@@ -1,0 +1,1090 @@
+#include <cassert>
+#include <chrono>
+#include <cstdio>
+#include <fstream>
+#include <vector> 
+#include "ngx_http_superresolution_util.hpp"
+
+#define INBUF_SIZE 4096
+
+void preprocess_YCrCb(InputArray inpImg, OutputArray outImg);
+void reconstruct_YCrCb(InputArray inpImg, InputArray origImg, OutputArray outImg, int scale);
+
+extern "C" ngx_int_t ngx_http_superresolution_scale_video(ngx_http_request_t *r, ngx_chain_t *in, ngx_chain_t *onnx, u_char* buf, int buflen, ngx_str_t *cache_file_name, size_t content_start);
+extern "C" ngx_int_t ngx_http_superresolution_delete_alternate_file(ngx_http_request_t *r);
+extern "C" ngx_int_t ngx_http_superresolution_get_scale(ngx_http_request_t *r);
+extern ngx_int_t ngx_http_file_cache_add(ngx_http_file_cache_t *cache, ngx_http_cache_t *c);
+
+extern "C" void update_compute_queue_size(ngx_uint_t tm, ngx_http_request_t *r);
+extern "C" ngx_int_t get_compute_queue_size();
+extern "C" ngx_int_t ngx_http_file_cache_get_quality(ngx_str_t *url, ngx_http_request_t *r);
+
+extern "C" ngx_int_t ngx_release_superresolution_queue_slot_in_ctx(void *data);
+extern "C" void delete_watchdog_timer_from_subrequest(ngx_http_request_t *r);
+
+
+typedef struct {
+  ngx_dims_t dimensions;
+  size_t frame_rate;
+} ngx_video_props_t;
+
+struct buffer_data {
+    uint8_t *ptr;
+    size_t size; ///< size left in the buffer
+};
+
+// ADD THIS after buffer_data:
+typedef struct {
+  cv::Mat image_bgr;
+  int64_t pts;
+} ngx_decoded_video_frame_t;
+
+static void
+ngx_sr_append_debug_log(const char *run_id, const char *hypothesis_id, const char *location,
+                        const char *message, const char *data_json)
+{
+    std::ofstream dbg("/home/ubuntu/nginx2/nginx-1.22.1/.cursor/debug-a31d6a.log", std::ios::app);
+    if (!dbg.is_open()) {
+        return;
+    }
+
+    long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    char line[1536];
+    int n = std::snprintf(
+        line, sizeof(line),
+        "{\"sessionId\":\"a31d6a\",\"runId\":\"%s\",\"hypothesisId\":\"%s\","
+        "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+        run_id, hypothesis_id, location, message, data_json, ts);
+    if (n > 0) {
+        dbg.write(line, n);
+    }
+}
+
+static int read_packet(void *opaque, uint8_t *buf, int buf_size)
+{
+    struct buffer_data *bd = (struct buffer_data *)opaque;
+    buf_size = FFMIN(buf_size, (int) bd->size);
+
+    if (!buf_size)
+        return AVERROR_EOF;
+    
+    memcpy(buf, bd->ptr, buf_size);
+    bd->ptr  += buf_size;
+    bd->size -= buf_size;
+ 
+    return buf_size;
+}
+ 
+
+static ngx_int_t encode(AVCodecContext *enc_ctx, AVFrame *enc_frame, AVPacket *enc_pkt,
+			ngx_chain_t **ll, ngx_http_request_t *r)
+{
+    int ret;
+
+    static ngx_int_t total_sz = 0;
+    /* send the frame to the encoder */
+    ret = avcodec_send_frame(enc_ctx, enc_frame);
+    if (ret < 0) {
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby: Unable to encode 1");
+      return NGX_DECLINED;
+    }
+ 
+    while (ret >= 0) {
+        ret = avcodec_receive_packet(enc_ctx, enc_pkt);
+        if (ret == AVERROR(EAGAIN)){
+          ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby: Unable to encode 2");
+          continue;
+	      }
+	      else if(ret == AVERROR_EOF){
+          ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby: Unable to encode 3");
+	        return NGX_DECLINED;
+	      }
+        else if (ret < 0) {	  
+          ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby: Unable to encode 4");
+	          return NGX_DECLINED;
+        }
+
+	      u_char *newbuf = (u_char *) ngx_pcalloc(r->pool, enc_pkt->size);
+	      ngx_memcpy(newbuf, enc_pkt->data, enc_pkt->size); 
+
+	      ngx_buf_t *tmpbuf;	
+	      tmpbuf = (ngx_buf_t *) ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+	      if (tmpbuf == NULL) {
+          ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby: Unable to encode 5");
+	        return NGX_DECLINED;
+	      } 
+
+	      total_sz += enc_pkt->size;
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                  "SR_DEBUG encode packet_size=%i running_total_sz=%i",
+                  enc_pkt->size, (ngx_int_t) total_sz);
+        // #region agent log
+        char dbg_data[256];
+        std::snprintf(dbg_data, sizeof(dbg_data),
+                  "{\"packet_size\":%d,\"running_total_sz\":%d}", enc_pkt->size, (int) total_sz);
+        ngx_sr_append_debug_log("initial", "H4", "ngx_http_superresolution_video.cpp:encode",
+                  "Encoded packet produced", dbg_data);
+
+        tmpbuf->pos   = newbuf;
+	      tmpbuf->last  = tmpbuf->pos + enc_pkt->size;
+	      tmpbuf->start = tmpbuf->pos;
+	      tmpbuf->end   = tmpbuf->last;
+	      tmpbuf->last_buf = 0;
+	      tmpbuf->memory   = 1;
+	      tmpbuf->in_file  = 0;
+	      tmpbuf->last_in_chain = 0;
+		
+	      ngx_chain_t *out = (ngx_chain_t *) ngx_pcalloc(r->pool, sizeof(ngx_chain_t));
+	      out->buf = tmpbuf;
+	      (*ll)->next = out;
+	      *ll = out;
+        av_packet_unref(enc_pkt);
+    }
+  return NGX_OK;
+}
+
+// Place this AFTER encode() and BEFORE decode_packet()
+
+static ngx_int_t process_superresolution_batch(ngx_http_request_t *r, ngx_chain_t **ll,
+  AVCodecContext *enc_ctx, AVPacket *enc_pkt,
+  std::vector<ngx_decoded_video_frame_t> &batch,
+  cv::dnn::Net net, float scale)
+{
+  if (batch.empty()) {
+    return NGX_OK;
+  }
+
+  auto sr_segment_t0 = std::chrono::steady_clock::now();
+
+  std::vector<cv::Mat> superresolved_images;
+  superresolved_images.reserve(batch.size());
+
+  if (scale > 1) {
+    std::vector<cv::Mat> preprocessed_images;
+    std::vector<cv::Mat> y_planes;
+    preprocessed_images.reserve(batch.size());
+    y_planes.reserve(batch.size());
+
+    // Preprocess all frames in the batch
+    for (size_t i = 0; i < batch.size(); i++) {
+      cv::Mat preprocessed;
+      preprocess_YCrCb(batch[i].image_bgr, preprocessed);
+      preprocessed_images.push_back(preprocessed);
+      // Extract Y plane (first channel) for the model
+      std::vector<cv::Mat> channels;
+      cv::split(preprocessed, channels);
+      y_planes.push_back(channels[0]);
+    }
+
+    // Single batched inference call — this is the key speedup
+    cv::Mat input_blob;
+    cv::dnn::blobFromImages(y_planes, input_blob, 1.0);
+    net.setInput(input_blob);
+    cv::Mat output_blob = net.forward();
+
+    std::vector<cv::Mat> model_outputs;
+    cv::dnn::imagesFromBlob(output_blob, model_outputs);
+
+    if (model_outputs.size() != batch.size()) {
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                    "SR_DEBUG batch size mismatch after net.forward()");
+      return NGX_DECLINED;
+    }
+
+    superresolved_images.resize(batch.size());
+    for (size_t i = 0; i < batch.size(); i++) {
+      reconstruct_YCrCb(model_outputs[i], preprocessed_images[i], superresolved_images[i], (int)scale);
+    }
+  } else {
+    superresolved_images.resize(batch.size());
+    for (size_t i = 0; i < batch.size(); i++) {
+      cv::resize(batch[i].image_bgr, superresolved_images[i], cv::Size(), scale, scale);
+    }
+  }
+
+  // Encode each superresolved frame
+  for (size_t i = 0; i < batch.size(); i++) {
+    int width  = superresolved_images[i].size().width;
+    int height = superresolved_images[i].size().height;
+    int cvLinesizes[1];
+    cvLinesizes[0] = superresolved_images[i].step1();
+
+    AVFrame *ffmpeg_frame = av_frame_alloc();
+    if (!ffmpeg_frame) {
+      return NGX_DECLINED;
+    }
+
+    ffmpeg_frame->format = enc_ctx->pix_fmt;
+    ffmpeg_frame->width  = width;
+    ffmpeg_frame->height = height;
+    ffmpeg_frame->pts    = batch[i].pts;
+
+    int ret = av_frame_get_buffer(ffmpeg_frame, 0);
+    if (ret < 0) {
+      av_frame_free(&ffmpeg_frame);
+      return NGX_DECLINED;
+    }
+
+    SwsContext *conversion_enc = sws_getContext(width, height, AVPixelFormat::AV_PIX_FMT_BGR24,
+                                                width, height, enc_ctx->pix_fmt,
+                                                SWS_FAST_BILINEAR, NULL, NULL, NULL);
+    if (!conversion_enc) {
+      av_frame_free(&ffmpeg_frame);
+      return NGX_DECLINED;
+    }
+
+    sws_scale(conversion_enc, &superresolved_images[i].data, cvLinesizes,
+              0, height, ffmpeg_frame->data, ffmpeg_frame->linesize);
+    sws_freeContext(conversion_enc);
+
+    ngx_int_t nginx_ret = encode(enc_ctx, ffmpeg_frame, enc_pkt, ll, r);
+    av_frame_free(&ffmpeg_frame);
+
+    if (nginx_ret == NGX_DECLINED) {
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                    "SR_DEBUG batch encode failed at frame index %zu", i);
+      return NGX_DECLINED;
+    }
+  }
+
+  auto sr_segment_t1 = std::chrono::steady_clock::now();
+  long long segment_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      sr_segment_t1 - sr_segment_t0).count();
+  ngx_log_debug3(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                 "SR_DEBUG superresolution segment elapsed_ms=%i frames=%i scale_milli=%i",
+                 (ngx_int_t) segment_ms, (ngx_int_t) batch.size(), (ngx_int_t)(scale * 1000));
+  char dbg_sr[256];
+  std::snprintf(dbg_sr, sizeof(dbg_sr),
+                "{\"segment_frames\":%zu,\"elapsed_ms\":%lld,\"scale\":%.3f}",
+                batch.size(), segment_ms, (double) scale);
+  ngx_sr_append_debug_log("initial", "H7",
+                          "ngx_http_superresolution_video.cpp:process_superresolution_batch",
+                          "Superresolution segment timing", dbg_sr);
+
+  batch.clear();
+  return NGX_OK;
+}
+
+
+// REPLACE the entire existing decode_packet() with this:
+
+static ngx_int_t decode_packet(ngx_http_request_t *r, ngx_chain_t **ll,
+  AVCodecContext *dec_ctx, AVFrame *dec_frame,
+  AVPacket *dec_pkt, AVFrame *enc_frame, AVCodecContext *enc_ctx,
+  AVPacket *enc_pkt, cv::dnn::Net net, float scale,
+  std::vector<ngx_decoded_video_frame_t> &frame_batch, size_t batch_size)
+{
+  int response = avcodec_send_packet(dec_ctx, dec_pkt);
+
+  if (response < 0) {
+    return NGX_DECLINED;
+  }
+
+  while (response >= 0)
+  {
+    response = avcodec_receive_frame(dec_ctx, dec_frame);
+    if (response == AVERROR(EAGAIN)) {
+      return NGX_AGAIN;
+    }
+    else if (response == AVERROR_EOF) {
+      return NGX_DECLINED;
+    }
+    else if (response < 0) {
+      return NGX_DECLINED;
+    }
+
+    int width  = dec_frame->width;
+    int height = dec_frame->height;
+    ngx_log_debug3(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "SR_DEBUG decode frame input_w=%i input_h=%i scale=%d",
+                   width, height, (ngx_int_t)(scale * 1000));
+    char dbg_input[256];
+    std::snprintf(dbg_input, sizeof(dbg_input),
+                  "{\"input_w\":%d,\"input_h\":%d,\"scale\":%.3f}", width, height, scale);
+    ngx_sr_append_debug_log("initial", "H3",
+                            "ngx_http_superresolution_video.cpp:decode_packet",
+                            "Frame decode received", dbg_input);
+
+    // Convert AVFrame to cv::Mat (BGR)
+    cv::Mat image(height, width, CV_8UC3);
+    int cvLinesizes[1];
+    cvLinesizes[0] = image.step1();
+
+    SwsContext *conversion = sws_getContext(width, height, (AVPixelFormat) dec_frame->format,
+                                            width, height, AVPixelFormat::AV_PIX_FMT_BGR24,
+                                            SWS_FAST_BILINEAR, NULL, NULL, NULL);
+    sws_scale(conversion, dec_frame->data, dec_frame->linesize, 0, height, &image.data, cvLinesizes);
+    sws_freeContext(conversion);
+
+    // Accumulate into batch instead of processing immediately
+    ngx_decoded_video_frame_t frame_item;
+    frame_item.image_bgr = image.clone();
+    frame_item.pts       = dec_frame->pts;
+    frame_batch.push_back(frame_item);
+
+    // Flush batch when full
+    if (frame_batch.size() >= batch_size) {
+      ngx_int_t sr_ret = process_superresolution_batch(r, ll, enc_ctx, enc_pkt,
+                                                        frame_batch, net, scale);
+      if (sr_ret != NGX_OK) {
+        return NGX_DECLINED;
+      }
+    }
+  }
+  return NGX_OK;
+}
+
+/*
+static ngx_int_t decode_packet(ngx_http_request_t *r, ngx_chain_t **ll, AVCodecContext *dec_ctx, AVFrame *dec_frame,
+			AVPacket *dec_pkt, AVFrame *enc_frame, AVCodecContext *enc_ctx,
+			AVPacket *enc_pkt, cv::dnn::Net net, float scale)
+{
+  int response = avcodec_send_packet(dec_ctx, dec_pkt);
+  int ret;
+
+  if (response < 0) {
+    return NGX_DECLINED;
+  }
+
+  while (response >= 0)
+  {
+    response = avcodec_receive_frame(dec_ctx, dec_frame);
+    if (response == AVERROR(EAGAIN)){
+      return NGX_AGAIN;
+    }
+    else if (response == AVERROR_EOF) {
+      return NGX_DECLINED;
+    }
+    else if (response < 0) {
+      return NGX_DECLINED;
+    }
+
+    int width  = dec_frame->width;
+    int height = dec_frame->height;
+    ngx_log_debug3(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "SR_DEBUG decode frame input_w=%i input_h=%i scale=%d",
+                   width, height, (ngx_int_t) (scale * 1000));
+    // #region agent log
+    char dbg_input[256];
+    std::snprintf(dbg_input, sizeof(dbg_input),
+                  "{\"input_w\":%d,\"input_h\":%d,\"scale\":%.3f}", width, height, scale);
+    ngx_sr_append_debug_log("initial", "H3", "ngx_http_superresolution_video.cpp:decode_packet",
+                            "Frame decode received", dbg_input);
+    // #endregion
+
+    cv::Mat image(height, width, CV_8UC3);
+    int cvLinesizes[1];
+    cvLinesizes[0] = image.step1();            
+      
+    SwsContext *conversion = sws_getContext(width, height, (AVPixelFormat) dec_frame->format, width, height,
+					    AVPixelFormat::AV_PIX_FMT_BGR24, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+    
+    sws_scale(conversion, dec_frame->data, dec_frame->linesize, 0, height, &image.data, cvLinesizes);
+    sws_freeContext(conversion);
+      
+    // Perform super-resolution
+    Mat superresolved_image;
+    int used_onnx = 0;
+    if (scale > 1){
+      used_onnx = 1;
+      superresolved_image = upscaleImageFromONNX(image, net, scale, r);
+    }
+    else {
+      resize(image, superresolved_image, cv::Size(), scale, scale);
+    }
+    ngx_log_debug3(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "SR_DEBUG superres output_w=%i output_h=%i used_onnx=%i",
+                   superresolved_image.size().width, superresolved_image.size().height, used_onnx);
+      
+    //Convert to ffmpeg frame
+    cvLinesizes[0]        = superresolved_image.step1();            
+    AVFrame *ffmpeg_frame = av_frame_alloc();      
+    ffmpeg_frame->format  = enc_ctx->pix_fmt;
+    ffmpeg_frame->width   = superresolved_image.size().width;
+    width                 = superresolved_image.size().width;
+    ffmpeg_frame->height  = superresolved_image.size().height;
+    height                = superresolved_image.size().height;
+    ffmpeg_frame->pts     = dec_frame->pts; 
+    ret                   = av_frame_get_buffer(ffmpeg_frame, 0);
+
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby: converted to ffmpeg frame");
+
+    if (ret < 0) {
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Could not convert superresolved image to ffmpeg frame");        
+      return NGX_DECLINED;
+    }
+        
+    SwsContext *conversion_enc = sws_getContext(width, height, AVPixelFormat::AV_PIX_FMT_BGR24, width, height,
+						enc_ctx->pix_fmt, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+    
+    sws_scale(conversion_enc, &superresolved_image.data, cvLinesizes, 0, height, ffmpeg_frame->data, ffmpeg_frame->linesize);      
+    sws_freeContext(conversion_enc);      
+      
+    //Encode it to a video
+    ngx_int_t nginx_ret;
+    nginx_ret = encode(enc_ctx, ffmpeg_frame, enc_pkt, ll, r);
+    
+    if (nginx_ret == NGX_DECLINED){
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Could not encode frame to ffmpeg packet");
+      return NGX_DECLINED;
+    }
+    
+    av_frame_free(&ffmpeg_frame);
+  }
+  return NGX_OK;
+}*/
+
+
+ngx_int_t
+ngx_http_superresolution_delete_alternate_file(ngx_http_request_t *r)
+{
+  std::string data_path = "/usr/local/data";
+  std::stringstream ss;
+
+  ss << data_path;
+  ss << r->uri.data;
+
+  if (ngx_delete_file(ss.str().c_str()) == NGX_FILE_ERROR) {
+    return NGX_DECLINED;
+  }
+
+  return NGX_OK;
+}
+
+ngx_int_t ngx_http_superresolution_get_scale(ngx_http_request_t *r)
+{
+  ngx_dims_t requested_dimensions;
+  ngx_str_t *str;
+
+  if (r->resolvable_to_alternate_index > 0){
+    str = (ngx_str_t *) r->headers_in.alternate_resolutions->elts;
+    requested_dimensions = ngx_http_superresolution_file_cache_get_dimensions(str[r->resolvable_to_alternate_index],
+                           r->connection->log);
+  }
+  else{
+    requested_dimensions = ngx_http_superresolution_file_cache_get_dimensions(r->headers_in.resolution,
+                           r->connection->log);
+  }
+  
+  str = (ngx_str_t *) r->headers_in.resolvable_resolutions->elts;
+  ngx_dims_t resolvable_dimensions;
+  
+  if (r->resolvable_from_origin > 0) {
+    resolvable_dimensions = ngx_http_superresolution_file_cache_get_dimensions(str[r->resolvable_from_origin - 1],
+											r->connection->log);
+  } else {
+    resolvable_dimensions = ngx_http_superresolution_file_cache_get_dimensions(str[r->cache->use_resolvable - 1],
+											r->connection->log);
+  }
+
+  ngx_uint_t scale_w = ((float) requested_dimensions.width/resolvable_dimensions.width)*100;
+  return scale_w;  
+}
+
+
+// Call this function if you know that the content is video
+ngx_int_t
+ngx_http_superresolution_scale_video(ngx_http_request_t *r, ngx_chain_t *in, ngx_chain_t *onnx, u_char *buf,
+				     int buflen, ngx_str_t *cache_file_name, size_t content_start)
+{
+  cv::dnn::Net net;
+  u_char *onnx_buf = NULL;
+  size_t onnx_buf_len = 0;
+  
+  auto t1 = high_resolution_clock::now();
+
+  ngx_dims_t requested_dimensions;
+  ngx_str_t *str;
+
+  if (r->parent->resolvable_to_alternate_index > 0){
+    str = (ngx_str_t *) r->parent->headers_in.alternate_resolutions->elts;
+    requested_dimensions = ngx_http_superresolution_file_cache_get_dimensions(str[r->parent->resolvable_to_alternate_index],
+										       r->parent->connection->log);
+  }
+  else{
+    requested_dimensions = ngx_http_superresolution_file_cache_get_dimensions(r->parent->headers_in.resolution,
+                           r->connection->log);
+  }
+
+  str = (ngx_str_t *) r->parent->headers_in.resolvable_resolutions->elts;
+  ngx_dims_t resolvable_dimensions;
+  
+  if (r->parent->resolvable_from_origin > 0) {
+    resolvable_dimensions = ngx_http_superresolution_file_cache_get_dimensions(str[r->parent->resolvable_from_origin - 1],
+											r->connection->log);
+  } else {
+    resolvable_dimensions = ngx_http_superresolution_file_cache_get_dimensions(str[r->parent->cache->use_resolvable - 1],
+											r->connection->log);
+  }
+
+  ngx_uint_t scale_w = ((float) requested_dimensions.width/resolvable_dimensions.width)*100;
+  ngx_uint_t scale_h = ((float) requested_dimensions.height/resolvable_dimensions.height)*100;
+  ngx_log_debug6(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                 "SR_DEBUG scale requested=%ix%i resolvable=%ix%i scale_w=%i scale_h=%i",
+                 requested_dimensions.width, requested_dimensions.height,
+                 resolvable_dimensions.width, resolvable_dimensions.height,
+                 scale_w, scale_h);
+  // #region agent log
+  char dbg_scale[256];
+  std::snprintf(dbg_scale, sizeof(dbg_scale),
+                "{\"requested_w\":%u,\"requested_h\":%u,\"resolvable_w\":%u,\"resolvable_h\":%u,\"scale_w\":%u,\"scale_h\":%u}",
+                (unsigned) requested_dimensions.width, (unsigned) requested_dimensions.height,
+                (unsigned) resolvable_dimensions.width, (unsigned) resolvable_dimensions.height,
+                (unsigned) scale_w, (unsigned) scale_h);
+  ngx_sr_append_debug_log("initial", "H1", "ngx_http_superresolution_video.cpp:ngx_http_superresolution_scale_video",
+                          "Scale factors computed", dbg_scale);
+  // #endregion
+
+  
+  if (scale_w != scale_h ||
+      scale_w == 100){
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "SR_DEBUG early return scale_w=%i scale_h=%i", scale_w, scale_h);
+    // #region agent log
+    ngx_sr_append_debug_log("initial", "H1", "ngx_http_superresolution_video.cpp:ngx_http_superresolution_scale_video",
+                            "Early return due to invalid scale", "{\"returned\":\"NGX_DECLINED\"}");
+    // #endregion
+    return NGX_DECLINED;
+  }
+
+  
+  if (scale_w > 100){
+  
+    DnnSuperResImpl super_r;
+    super_r.setModel("espcn", 2);  
+  
+    if (onnx->buf->in_file){
+    
+      int n = 0;
+
+      if (content_start > 0) {      
+	      onnx_buf_len = onnx->buf->file_last - content_start;
+	      onnx_buf = (u_char *) malloc(onnx->buf->file_last - content_start);		
+	      n = ngx_read_file(onnx->buf->file, onnx_buf, onnx_buf_len, content_start);
+      }
+      else{      
+	      onnx_buf_len = onnx->buf->file_last - onnx->buf->file_pos;
+	      onnx_buf = (u_char *) malloc(onnx->buf->file_last - onnx->buf->file_pos);            
+	      n = ngx_read_file(onnx->buf->file, onnx_buf, onnx_buf_len, onnx->buf->file_pos);
+      }	
+    
+      if (n <= 0){
+	      return NGX_DECLINED;
+      }
+    
+      net = cv::dnn::readNetFromTensorflow(reinterpret_cast<char *>(onnx_buf), onnx_buf_len);    
+      net.setPreferableTarget(DNN_TARGET_CUDA);
+      net.setPreferableBackend(DNN_BACKEND_CUDA);
+      //net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
+      //net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+    }
+    else{
+      ngx_chain_t *cl = onnx;
+      
+      while(cl != NULL){
+	      onnx_buf_len += cl->buf->last - cl->buf->pos;
+	      cl = cl->next;
+      }
+    
+      onnx_buf = (u_char *) ngx_pcalloc(r->pool, onnx_buf_len);
+    
+      u_char *curr = onnx_buf;
+      size_t copied = 0;
+      size_t copy_bytes = 0;
+      cl = onnx;
+
+      while(copied < onnx_buf_len && cl != NULL){
+	      copy_bytes = cl->buf->last - cl->buf->pos;
+	      ngx_memcpy(curr, cl->buf->pos, copy_bytes);
+	      curr += copy_bytes;
+	      cl = cl->next;
+      }
+    
+      net = cv::dnn::readNetFromTensorflow(reinterpret_cast<char *>(onnx_buf), onnx_buf_len);
+      //net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
+      //net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU); 
+      net.setPreferableTarget(DNN_TARGET_CUDA);
+      net.setPreferableBackend(DNN_BACKEND_CUDA);
+    }
+    if (net.empty()){
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "SR_DEBUG onnx net empty");
+      // #region agent log
+      ngx_sr_append_debug_log("initial", "H2", "ngx_http_superresolution_video.cpp:ngx_http_superresolution_scale_video",
+                              "ONNX net is empty", "{\"net_empty\":1}");
+      // #endregion
+      return NGX_DECLINED;
+    }
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "SR_DEBUG onnx net loaded");
+    // #region agent log
+    ngx_sr_append_debug_log("initial", "H2", "ngx_http_superresolution_video.cpp:ngx_http_superresolution_scale_video",
+                            "ONNX net loaded", "{\"net_empty\":0}");
+    // #endregion
+  }
+
+  // FFMPEG code to decode and encode frames of the video.
+  AVFormatContext *fmt_ctx = NULL;
+  AVIOContext *avio_ctx    = NULL;
+  uint8_t *avio_ctx_buffer = NULL;
+  size_t avio_ctx_buffer_size = buflen;
+
+  struct buffer_data bd = { 0, 0 };
+  bd.ptr  = (uint8_t *) buf;
+  bd.size = buflen;
+
+  //av_log_set_level(AV_LOG_FATAL);
+  int ret;
+  
+  if (!(fmt_ctx = avformat_alloc_context())) {
+    return NGX_DECLINED;
+  }
+  
+  avio_ctx_buffer = (uint8_t *) av_malloc(avio_ctx_buffer_size);
+  if (!avio_ctx_buffer) {
+    return NGX_DECLINED;
+  }
+
+  fmt_ctx->max_analyze_duration = 2147483647;
+  fmt_ctx->probesize = 2147483647;
+  
+
+  avio_ctx = avio_alloc_context(avio_ctx_buffer, avio_ctx_buffer_size,
+				0, &bd, &read_packet, NULL, NULL);
+  if (!avio_ctx) {
+    return NGX_DECLINED;
+  }
+  
+  fmt_ctx->pb = avio_ctx;
+
+  ret = avformat_open_input(&fmt_ctx, NULL, NULL, NULL);
+  if (ret < 0) {
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Could not open input");
+    return NGX_DECLINED;
+  }
+
+  ret = avformat_find_stream_info(fmt_ctx, NULL);
+  if (ret < 0) {
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Could not find stream info");
+    return NGX_DECLINED;
+  }
+
+
+  AVCodecParameters *pCodecParameters =  NULL;
+  int video_stream_index = -1;
+
+  const AVCodec *decode_codec;
+  const AVCodec *encode_codec;
+  
+  for (ngx_uint_t i = 0; i < fmt_ctx->nb_streams; i++){
+    AVCodecParameters *pLocalCodecParameters =  NULL;
+    pLocalCodecParameters = fmt_ctx->streams[i]->codecpar;
+    
+    const AVCodec *pLocalCodec = NULL;
+    pLocalCodec = avcodec_find_decoder(pLocalCodecParameters->codec_id);
+
+    if(pLocalCodec == NULL){
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Unsupported codec");
+    }
+
+    // when the stream is a video we store its index, codec parameters and codec
+    if (pLocalCodecParameters->codec_type == AVMEDIA_TYPE_VIDEO) {
+      if (video_stream_index == -1) {
+	      video_stream_index = i;
+	      decode_codec = (AVCodec *) pLocalCodec;
+	      pCodecParameters = pLocalCodecParameters;
+      }
+    }        
+  }
+  
+
+  if (video_stream_index == -1) {
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "File does not have a video stream");
+    return NGX_DECLINED;
+  }
+
+  //pCodecParameters->pxl_fmt = AV_PIX_FMT_YUV420P;
+  
+  AVCodecContext *decode_c= NULL;
+  AVCodecContext *encode_c= NULL;
+
+  //decode_codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+  
+
+  decode_c = avcodec_alloc_context3(decode_codec);
+  if (!decode_c){
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Failed to allocate memory for AVCodecContext");
+    return NGX_DECLINED;
+  }
+
+  if (avcodec_parameters_to_context(decode_c, pCodecParameters) < 0){
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Failed to copy codec params to codec context");
+    return NGX_DECLINED;
+  }
+
+  //decode_c->pix_fmt = AV_PIX_FMT_YUV420P;
+
+  if (avcodec_open2(decode_c, decode_codec, NULL) < 0){
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Failed to open codec through avcodec_open2");
+    return NGX_DECLINED;
+  }
+
+  
+  encode_codec = avcodec_find_encoder(pCodecParameters->codec_id);
+  //encode_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+  
+  if (!encode_codec) {
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Failed to find encode codec");
+    return NGX_DECLINED;
+  }  
+ 
+  encode_c = avcodec_alloc_context3(encode_codec);
+  if (!encode_c) {
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Failed to allocated codec context");
+    return NGX_DECLINED;
+  }
+
+  if (avcodec_parameters_to_context(encode_c, pCodecParameters)) {
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Failed to copy encoder parameters");
+    return NGX_DECLINED;
+  }
+
+  float scale = ((float) scale_w)/100;
+
+  encode_c->width  = (int) decode_c->width * scale;
+  encode_c->height = (int) decode_c->height * scale;
+  
+  encode_c->time_base = (AVRational){1, 24}; 
+  encode_c->framerate = (AVRational){24, 1};
+  
+  encode_c->gop_size = 10;
+  encode_c->max_b_frames = 1;
+  encode_c->pix_fmt = AV_PIX_FMT_YUV420P;
+
+  if (avcodec_open2(encode_c, encode_codec, NULL) < 0) {
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Could not open encode codec");        
+    return NGX_DECLINED;
+  }
+
+  AVPacket *decode_pkt;
+  AVPacket *encode_pkt;
+  AVFrame *decode_frame;
+  AVFrame *encode_frame;
+  
+  decode_pkt = av_packet_alloc();
+  if (!decode_pkt){
+    return NGX_DECLINED;
+  }
+
+  encode_pkt = av_packet_alloc();
+  if (!encode_pkt){
+    return NGX_DECLINED;
+  }
+  
+  decode_frame = av_frame_alloc();
+  if (!decode_frame) {
+    return NGX_DECLINED;
+  }
+  
+  encode_frame = av_frame_alloc();
+  if (!encode_frame) {
+    return NGX_DECLINED;
+  }
+
+  ngx_chain_t *ll = (ngx_chain_t *) ngx_pcalloc(r->pool, sizeof(ngx_chain_t));
+  ngx_chain_t *tmp = ll;
+  
+  // ADD THESE TWO LINES:
+  std::vector<ngx_decoded_video_frame_t> frame_batch;
+  const size_t sr_batch_size = 1;  // increase to 4-8 if GPU memory allows
+
+  ngx_int_t response = 0;
+  ngx_int_t video_packet_count = 0;
+  ngx_int_t decode_ok_count = 0;
+  ngx_int_t decode_again_count = 0;
+  ngx_int_t decode_declined_count = 0;
+
+  while (av_read_frame(fmt_ctx, decode_pkt) >= 0){
+    
+    if (decode_pkt->stream_index == video_stream_index) {
+      video_packet_count++;
+      
+      response = decode_packet(r, &ll, decode_c, decode_frame, decode_pkt,
+                               encode_frame, encode_c, encode_pkt, net, scale,
+                               frame_batch, sr_batch_size);  // <-- ADD THESE TWO ARGS
+
+      if (response == NGX_AGAIN){
+	      decode_again_count++;
+	      continue;
+      }
+      else if (response == NGX_DECLINED){
+	      decode_declined_count++;
+	      return NGX_DECLINED;
+      }
+      else if (response == NGX_OK) {
+	      decode_ok_count++;
+      }
+    }
+    av_packet_unref(decode_pkt);
+  }    
+
+  // After the while loop, BEFORE encode(encode_c, NULL, ...):
+  if (!frame_batch.empty()) {
+    ngx_int_t sr_ret = process_superresolution_batch(r, &ll, encode_c, encode_pkt,
+                                                      frame_batch, net, scale);
+    if (sr_ret != NGX_OK) {
+      return NGX_DECLINED;
+    }
+  }
+  //encode_c->flush = 1;
+  encode(encode_c, NULL, encode_pkt, &ll, r);
+
+  ngx_log_debug4(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                 "SR_DEBUG loop summary video_packets=%i decode_ok=%i decode_again=%i decode_declined=%i",
+                 video_packet_count, decode_ok_count, decode_again_count, decode_declined_count);
+  // #region agent log
+  char dbg_loop[256];
+  std::snprintf(dbg_loop, sizeof(dbg_loop),
+                "{\"video_packets\":%d,\"decode_ok\":%d,\"decode_again\":%d,\"decode_declined\":%d}",
+                (int) video_packet_count, (int) decode_ok_count, (int) decode_again_count, (int) decode_declined_count);
+  
+  ngx_sr_append_debug_log("initial", "H6", "ngx_http_superresolution_video.cpp:ngx_http_superresolution_scale_video",
+                          "Decode loop summary", dbg_loop);
+  // #endregion
+  
+  //ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "expected_request_processing_time %d", r->parent->expected_request_processing_time);
+
+  /*
+  ngx_http_file_cache_t *cache = r->parent->cache->file_cache;
+  ngx_shmtx_lock(&cache->shpool->mutex);
+  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby 5");
+  update_compute_queue_size(-1*r->parent->expected_request_processing_time, r->parent);
+  ngx_shmtx_unlock(&cache->shpool->mutex);
+  */
+
+  //update_compute_queue_size(-1*r->parent->expected_request_processing_time, r->parent);
+
+  //ngx_int_t rc = ngx_release_superresolution_queue_slot_in_ctx(r->parent);
+  //if (rc == NGX_OK){
+  //  delete_watchdog_timer_from_subrequest(r->parent);
+  //}
+
+  //ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+  //               "sabby resolvable queue updated: new size=%i, delta=%i",
+  //               get_compute_queue_size(),
+  //               -1*r->parent->expected_request_processing_time);
+
+  // Move to the last chain
+  ngx_chain_t *cl = in;
+  for (cl = in; cl->next != NULL; cl = cl->next) {
+    if (cl->buf->last_buf) {
+      break;
+    }
+  }
+  // Now start adding the linked list stored in tmp to cl
+  ngx_int_t total_sz = 0;
+  ngx_chain_t *t = tmp->next;
+  
+  while (t != NULL){
+    total_sz += t->buf->last - t->buf->start;
+    t = t->next;
+  }
+  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                "SR_DEBUG pre-write aggregate total_sz=%i", total_sz);
+  
+  u_char *newbuf = (u_char *) ngx_pcalloc(r->pool, total_sz);
+  u_char *curr = newbuf;
+  ngx_int_t copied = 0;
+  size_t to_copy_bytes;
+  t = tmp->next;
+  
+  while(copied <= total_sz && t!=NULL){
+    to_copy_bytes = t->buf->last - t->buf->pos;
+    ngx_memcpy(curr, t->buf->pos, to_copy_bytes);
+    copied += to_copy_bytes;
+    curr += to_copy_bytes;
+    t = t->next;
+  }
+
+  // size_t pos = 0;
+  // u_char *last = r->parent->uri.data;
+  // u_char *last_pos;
+  // for(size_t i=0; i <= r->parent->uri.len; i++){
+  //   if(*last == '/'){
+  //     pos = i;
+  //     last_pos = last; 
+  //   }
+  //   last++;
+  // }
+  
+  //u_char *fname = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char) * (r->parent->uri.len - pos + 1));
+  //ngx_memcpy(fname, last_pos, r->parent->uri.len - pos);
+
+  //u_char *fname = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char) * (r->parent->uri.len + 1));
+  //ngx_memcpy(fname, r->parent->uri.data, r->parent->uri.len);
+
+  auto t2 = high_resolution_clock::now();
+  auto ms_int = duration_cast<milliseconds>(t2 - t1);
+  r->parent->superresolution_time = (int) ms_int.count();
+  //ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby completed superresolution Unable to open alternate file");            
+
+  std::string data_path = "/usr/local/data";
+  std::string alt_path = "/alternate";
+
+  // u_char *alt_fname = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char) * (25 + r->parent->uri.len - pos + 1));
+  // std::copy(data_path.begin(), data_path.end(), alt_fname);
+  // std::copy(alt_path.begin(), alt_path.end(), alt_fname + 15);
+  // ngx_memcpy(alt_fname + 25, fname,  r->parent->uri.len - pos);
+   u_char *alt_fname;
+
+  if (r->parent->resolvable_to_alternate_index >=0) {
+    ngx_str_t *str;
+    str = (ngx_str_t *) r->parent->headers_in.alternate_objects->elts;
+    ngx_str_t alt_object = str[r->parent->resolvable_to_alternate_index];
+    alt_fname = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char) * (15 + alt_object.len + 1));
+  }
+  else {
+    alt_fname = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char) * (25 + r->parent->uri.len + 1));
+  }
+  std::copy(data_path.begin(), data_path.end(), alt_fname);
+  std::copy(alt_path.begin(), alt_path.end(), alt_fname + 15);
+  //ngx_memcpy(alt_fname + 25, fname,  r->parent->uri.len);
+  ngx_memcpy(alt_fname + 25, r->parent->uri.data,  r->parent->uri.len);
+
+  ngx_str_t file_name;
+  file_name.data = alt_fname; 
+  //file_name.len = 25 + r->parent->uri.len - pos;
+  file_name.len = 25 + r->parent->uri.len; 
+
+  //Write super-resolved object to cache on disk
+  size_t bytes_written;
+  ngx_file_t *file;
+  file = (ngx_file_t *) ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+  
+  file->name = file_name;
+  file->log = r->connection->log;
+  file->fd = ngx_open_file(file->name.data, NGX_FILE_WRONLY,  NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS);
+
+  if (file->fd ==  NGX_INVALID_FILE){
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Unable to open alternate file %s", alt_fname);            
+    return NGX_DECLINED;
+  }
+
+  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Total size: %d", total_sz);            
+  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "SR_DEBUG final total_sz=%i", total_sz);
+  // #region agent log
+  char dbg_total[160];
+  std::snprintf(dbg_total, sizeof(dbg_total), "{\"total_sz\":%d}", (int) total_sz);
+  ngx_sr_append_debug_log("initial", "H4", "ngx_http_superresolution_video.cpp:ngx_http_superresolution_scale_video",
+                          "Total encoded payload size", dbg_total);
+  // #endregion
+  
+  bytes_written = ngx_write_fd(file->fd, newbuf, total_sz);
+  ngx_close_file(file->fd);   
+  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "SR_DEBUG bytes_written=%i", (ngx_int_t) bytes_written);
+  // #region agent log
+  char dbg_written[160];
+  std::snprintf(dbg_written, sizeof(dbg_written), "{\"bytes_written\":%d}", (int) bytes_written);
+  ngx_sr_append_debug_log("initial", "H5", "ngx_http_superresolution_video.cpp:ngx_http_superresolution_scale_video",
+                          "Alternate file write result", dbg_written);
+  // #endregion
+  
+  if (bytes_written <= 0){
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Alternate file bytes written <= 0");            
+    return NGX_DECLINED;
+  }
+  // u_char *uri_str = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char) * (alt_path.size() + r->parent->uri.len - pos + 1));
+  // std::copy(alt_path.begin(), alt_path.end(), uri_str);
+  // ngx_memcpy(uri_str + alt_path.size(), fname,  r->parent->uri.len - pos);
+
+  ngx_int_t ngx_ret;
+
+  if (r->parent->resolvable_to_alternate_index >=0) {
+    ngx_str_t *str;
+    str = (ngx_str_t *) r->parent->headers_in.alternate_objects->elts;
+    ngx_str_t alt_object = str[r->parent->resolvable_to_alternate_index];
+    u_char *uri_str = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char) * (15 + alt_object.len + 1));
+    std::copy(data_path.begin(), data_path.end(), uri_str);
+    std::copy(alt_path.begin(), alt_path.end(), uri_str + 15);
+    ngx_memcpy(uri_str + 25, alt_object.data,  alt_object.len);
+    
+    ngx_str_t *uri = (ngx_str_t *) ngx_pcalloc(r->pool, sizeof(ngx_str_t));;
+    uri->data = uri_str;
+    uri->len = (15 + alt_object.len);
+    
+    // The subrequest will send the file to the client
+    ngx_http_request_t  *sr;
+   
+    ngx_ret = ngx_http_subrequest(r, uri, NULL, &sr, NULL, 0);    
+  }
+  else {
+
+    u_char *uri_str = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char) * (alt_path.size() + r->parent->uri.len + 1));
+    std::copy(alt_path.begin(), alt_path.end(), uri_str);
+    ngx_memcpy(uri_str + alt_path.size(), r->parent->uri.data, r->parent->uri.len);
+  
+    // ngx_str_t *uri = (ngx_str_t *) ngx_pcalloc(r->pool, sizeof(ngx_str_t));;
+    // uri->data = uri_str;
+    // uri->len = (alt_path.size() + r->parent->uri.len - pos);
+
+    ngx_str_t *uri = (ngx_str_t *) ngx_pcalloc(r->pool, sizeof(ngx_str_t));;
+    uri->data = uri_str;
+    uri->len = (alt_path.size() + r->parent->uri.len);
+  
+    // The subrequest will send the file to the client
+    ngx_http_request_t  *sr;
+    ngx_ret = ngx_http_subrequest(r, uri, NULL, &sr, NULL, 0);    
+
+  }
+  u_char *nbuf = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char));
+  *nbuf = 'A';
+  
+  ngx_buf_t *tmpbuf;
+  tmpbuf = (ngx_buf_t *) ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+
+  if (tmpbuf == NULL) {
+    return NGX_DECLINED;
+  }
+  
+  // if (scale_w > 100 && quality == 1){
+  //   update_compute_queue_size(-80);
+  // }
+  // else if (scale_w > 100 && quality == 2){
+  //   update_compute_queue_size(-40);
+  // }
+  
+  
+  // tmpbuf->pos   = newbuf;
+  // tmpbuf->last  = tmpbuf->pos + total_sz;
+  // tmpbuf->start = tmpbuf->pos;
+  // tmpbuf->end   = tmpbuf->last;
+  // tmpbuf->last_buf = 1;
+  // tmpbuf->memory   = 1;
+  // cl->buf = tmpbuf;     
+
+  tmpbuf->pos   = nbuf;
+  tmpbuf->last  = tmpbuf->pos + sizeof(u_char);
+  tmpbuf->start = tmpbuf->pos;
+  tmpbuf->end   = tmpbuf->last;
+  tmpbuf->last_buf = 1;
+  tmpbuf->in_file = 0;
+  tmpbuf->memory   = 1;
+
+  cl->buf = tmpbuf;      
+   // Write code to clear ll. I wish i could do this in a better way
+  ngx_free_chain(r->pool, tmp);  
+
+  if (ngx_ret == NGX_DECLINED){
+    return NGX_DECLINED;
+  }
+  
+  /* Free up space after all operations */
+  avcodec_free_context(&encode_c);
+  avcodec_free_context(&decode_c);
+  av_frame_free(&encode_frame);
+  av_frame_free(&decode_frame);
+  av_packet_free(&encode_pkt);
+  av_packet_free(&decode_pkt);
+  
+  return NGX_OK; 
+}
+

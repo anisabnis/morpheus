@@ -1,0 +1,112 @@
+28,33d27
+< static ngx_int_t ngx_http_process_alternate_object(ngx_http_request_t *r,
+<     ngx_table_elt_t *h, ngx_uint_t offset);
+< static ngx_int_t ngx_http_process_resolvable_objects(ngx_http_request_t *r,
+<     ngx_table_elt_t *h, ngx_uint_t offset);
+< static ngx_int_t ngx_http_process_resolution(ngx_http_request_t *r,
+<     ngx_table_elt_t *h, ngx_uint_t offset);
+199,208c193
+<     
+<     { ngx_string("Alternate-Media-Files"), offsetof(ngx_http_headers_in_t, alternate_objects),
+<                  ngx_http_process_alternate_object },
+< 
+<     { ngx_string("Resolvable-Media-Files"), offsetof(ngx_http_headers_in_t, resolvable_objects),
+<                  ngx_http_process_resolvable_objects },
+< 
+<     { ngx_string("Media-Resolution"), offsetof(ngx_http_headers_in_t, resolution),
+<                  ngx_http_process_resolution},
+<     
+---
+> 
+1632,1718d1616
+< static ngx_uint_t ngx_http_split_string(ngx_array_t *a, u_char *str,
+< 					ngx_uint_t len, u_char delimiter)
+< {
+<   u_char *m, *n;
+<   m = n = str;
+< 
+<   for(size_t i=0; i < len; i++){
+<     if (m != NULL && *m == delimiter){
+<       ngx_str_t *t = ngx_array_push(a);
+<       t->data = (u_char *) n;
+<       t->len  = m - n;
+<       n = m + 1;
+<     }
+<     ++m;
+<   }
+< 
+<   //Copy the remaining  string
+<   if (m > n){
+<     ngx_str_t *t = ngx_array_push(a);
+<     t->data = (u_char *) n;
+<     t->len  = m - n;
+<   }
+<   return NGX_OK;
+< }
+< 
+< static ngx_int_t
+< ngx_http_process_alternate_object(ngx_http_request_t *r, ngx_table_elt_t *h,
+<     ngx_uint_t offset)
+< {  
+<   
+<   ngx_uint_t ret;
+<   if (r->headers_in.alternate_objects == NULL){
+<     u_char delimiter = ';';
+<     r->headers_in.alternate_objects = ngx_array_create(r->pool, 4, sizeof(ngx_str_t));
+<     ret = ngx_http_split_string(r->headers_in.alternate_objects, h->value.data,
+< 				h->value.len, delimiter);
+<   }    
+<     
+<   return NGX_OK;  
+< }
+< 
+< static ngx_int_t
+< ngx_http_process_resolvable_objects(ngx_http_request_t *r, ngx_table_elt_t *h,
+<     ngx_uint_t offset)
+< {
+<   if (r->headers_in.resolvable_objects == NULL){
+< 
+<     ngx_uint_t ret;
+<     u_char delimiter = ';';
+<     ngx_array_t *tmp_array = ngx_array_create(r->pool, 4, sizeof(ngx_str_t));
+< 
+<     ret = ngx_http_split_string(tmp_array, h->value.data, h->value.len, delimiter);
+<     r->headers_in.resolvable_objects     = ngx_array_create(r->pool, 4,
+< 							    sizeof(ngx_str_t));
+<     r->headers_in.resolvable_resolutions = ngx_array_create(r->pool, 4,
+< 							    sizeof(ngx_str_t));   
+< 
+<     ngx_str_t *str = tmp_array->elts;
+<     for(size_t i = 0; i < tmp_array->nelts; i++){
+<       u_char *m, *n;
+<       m = n = str[i].data;
+<       for(size_t j = 0; j < str[i].len; j++){
+< 	if(*m == ':'){
+< 	  ngx_str_t *t = ngx_array_push(r->headers_in.resolvable_objects);
+< 	  t->data = (u_char *) n;
+< 	  t->len  = m - n;
+< 	  n = m + 1;
+< 	}
+< 	++m;
+<       }
+<       ngx_str_t *t = ngx_array_push(r->headers_in.resolvable_resolutions);
+<       t->data = (u_char *) n;
+<       t->len  = m - n;      
+<     }    
+<   }    
+<     
+<   return NGX_OK;  
+< }
+< 
+< static ngx_int_t
+< ngx_http_process_resolution(ngx_http_request_t *r, ngx_table_elt_t *h,
+<     ngx_uint_t offset)
+< {
+<   r->headers_in.resolution = h->value;
+<   return NGX_OK;
+< }
+< 
+1725c1623
+<     
+---
+> 

@@ -1,0 +1,6 @@
+237,241d236
+<     ngx_array_t                       *alternate_objects;
+<     ngx_array_t                       *resolvable_objects;
+<     ngx_array_t                       *resolvable_resolutions;
+<     ngx_str_t                         resolution;    
+<   

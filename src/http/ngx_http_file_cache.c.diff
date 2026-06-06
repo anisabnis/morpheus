@@ -1,0 +1,489 @@
+2d1
+< 
+188c187
+<     
+---
+> 
+245,246c244,245
+<         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+<                        "http cache key: \"%V\" \"%d\"", &key[i], key[i].len);
+---
+>         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+>                        "http cache key: \"%V\"", &key[i]);
+254,255c253,254
+<     c->header_start = c->header_start_main = sizeof(ngx_http_file_cache_header_t)
+<       + sizeof(ngx_http_file_cache_key) + len + 1;
+---
+>     c->header_start = sizeof(ngx_http_file_cache_header_t)
+>                       + sizeof(ngx_http_file_cache_key) + len + 1;
+264,551d262
+< void
+< ngx_http_file_cache_create_alternate_keys(ngx_http_request_t *r)
+< {
+< 
+<     size_t             len;
+<     ngx_str_t         *key;
+<     ngx_str_t         *alt_media;
+<     ngx_uint_t         i;
+<     ngx_http_cache_t  *c;
+< 
+<     c = r->cache;
+< 
+<     c->alt_crcs                  = ngx_pcalloc(r->pool, r->headers_in.alternate_objects->nelts*sizeof(uint32_t));
+<     c->header_start_alternatives = ngx_pcalloc(r->pool, r->headers_in.alternate_objects->nelts*sizeof(size_t));
+<     c->alt_keys                  = ngx_array_create(r->pool, 4, sizeof(ngx_str_t));
+< 
+<     
+<     key = c->keys.elts;
+<     alt_media = r->headers_in.alternate_objects->elts;
+<     
+<     for (size_t j=0; j < r->headers_in.alternate_objects->nelts; j++){
+< 
+<       ngx_md5_t          md5;
+<       len = 0;
+< 
+<       ngx_md5_init(&md5);
+<       ngx_crc32_init(c->alt_crcs[j]);    
+<         
+<       for (i = 0; i < c->keys.nelts; i++) {
+<         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+<                        "http alternate cache key: \"%V\" \"%d\"", &key[i], key[i].len);
+< 
+<         len += key[i].len;
+< 	ngx_crc32_update(&c->alt_crcs[j], key[i].data, key[i].len);
+<         ngx_md5_update(&md5, key[i].data, key[i].len);
+< 	break;
+<       }
+< 
+<       u_char *t = (u_char *) malloc(alt_media[j].len);
+<       memcpy(t, alt_media[j].data, alt_media[j].len);
+<       ngx_md5_update(&md5, t, alt_media[j].len); 
+<       ngx_crc32_update(&c->alt_crcs[j], t, alt_media[j].len);
+<       ngx_crc32_final(c->alt_crcs[j]);
+< 
+<       ngx_str_t *tmp = ngx_array_push(c->alt_keys);
+<       tmp->data = (u_char *) ngx_pcalloc(r->pool, NGX_HTTP_CACHE_KEY_LEN);      
+<       tmp->len  = NGX_HTTP_CACHE_KEY_LEN;
+<       ngx_md5_final(tmp->data, &md5);
+< 
+<       ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 		     "http alternate object key: \"%s\" \"%d\"", alt_media[j].data, alt_media[j].len);
+<       
+<       len += alt_media[j].len;
+<       c->header_start_alternatives[j] = sizeof(ngx_http_file_cache_header_t) 
+< 	+ sizeof(ngx_http_file_cache_key) + len + 1;
+< 
+<       free(t);            
+<     }
+< }
+< 
+< typedef struct {
+<   ngx_int_t width;
+<   ngx_int_t height;
+< } ngx_dimensions_t;
+< 
+< 
+< ngx_dimensions_t
+< ngx_http_file_cache_get_media_dimensions(ngx_str_t resolution, ngx_log_t *log)
+< {
+<   u_char *m, *n;
+<   m = n = resolution.data;
+<   ngx_dimensions_t dim;
+<   dim.width = -1;
+<   dim.height = -1;
+<   
+<   for (size_t i=0; i < resolution.len; i++){
+<     if(m != NULL && (*m == 'x' || *m == 'X')){
+<       dim.width = ngx_atoi(n, m-n);
+<       n = m+1;
+<     }
+<     ++m;
+<   }
+< 
+<   if (m>n){
+<     dim.height = ngx_atoi(n, m-n);
+<   }  
+<   return dim;
+< }
+< 
+< 
+< ngx_int_t
+< ngx_http_file_cache_check_if_valid_resolution(ngx_http_request_t *r, ngx_uint_t index)
+< {
+<   ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 		 "http resolution header: \"%s\" \"%d\"", r->headers_in.resolution.data, r->headers_in.resolution.len);
+< 
+<   ngx_dimensions_t requested_dimensions = ngx_http_file_cache_get_media_dimensions(r->headers_in.resolution, r->connection->log);
+<   
+<   if (requested_dimensions.width == -1 || requested_dimensions.height == -1){
+<     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 		   "http resolution dimensions requested are : \"%d\" \"%d\"", requested_dimensions.width, requested_dimensions.height);
+<     return NGX_ERROR;
+<   }
+<   
+<   ngx_str_t *str = r->headers_in.resolvable_resolutions->elts;
+<   ngx_dimensions_t resolvable_dimensions = ngx_http_file_cache_get_media_dimensions(str[index], r->connection->log);
+< 
+<   if (resolvable_dimensions.width == -1 || resolvable_dimensions.height == -1){
+<     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 		   "http resolvable dimensions requested are : \"%d\" \"%d\"", resolvable_dimensions.width, resolvable_dimensions.height);
+<     return NGX_ERROR;
+<   }
+< 
+<   ngx_uint_t scale_w = ((float) requested_dimensions.width/resolvable_dimensions.width)*100;
+<   ngx_uint_t scale_h = ((float) requested_dimensions.height/resolvable_dimensions.height)*100;
+< 
+<   ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 		   "http scale_w and scale_h : \"%d\" \"%d\"", scale_w, scale_h);
+<   
+<   if (scale_w != scale_h){
+<     return NGX_ERROR;
+<   }
+< 
+<   if(!(scale_w == 25 || scale_w == 50 || scale_w == 100 || scale_w == 200 || scale_w == 400)){
+<     return NGX_ERROR;
+<   }
+<   
+<   return NGX_OK;
+<     
+< }
+< 
+< 
+< void
+< ngx_http_file_cache_create_resolved_keys(ngx_http_request_t *r)
+< {
+< 
+<     size_t             len;
+<     ngx_str_t         *key;
+<     ngx_str_t         *resolvable_media;
+<     ngx_uint_t         i;
+<     ngx_http_cache_t  *c;
+< 
+<     c = r->cache;
+< 
+<     c->resolvable_crcs           = ngx_pcalloc(r->pool, r->headers_in.resolvable_objects->nelts*sizeof(uint32_t));
+<     c->header_start_resolvables  = ngx_pcalloc(r->pool, r->headers_in.resolvable_objects->nelts*sizeof(size_t));
+<     c->resolvable_keys           = ngx_array_create(r->pool, 4, sizeof(ngx_str_t));
+< 
+<     
+<     key = c->keys.elts;
+<     resolvable_media = r->headers_in.resolvable_objects->elts;
+<     
+<     for (size_t j=0; j < r->headers_in.resolvable_objects->nelts; j++){
+< 
+<       ngx_md5_t          md5;
+<       len = 0;
+< 
+<       ngx_int_t ret = ngx_http_file_cache_check_if_valid_resolution(r, j);
+< 
+<       if (ret != NGX_OK)
+< 	continue;
+<             
+<       ngx_md5_init(&md5);
+<       ngx_crc32_init(c->resolvable_crcs[j]);    
+<         
+<       for (i = 0; i < c->keys.nelts; i++) {
+<         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+<                        "http resolvable cache key: \"%V\" \"%d\"", &key[i], key[i].len);
+< 
+<         len += key[i].len;
+< 	ngx_crc32_update(&c->resolvable_crcs[j], key[i].data, key[i].len);
+<         ngx_md5_update(&md5, key[i].data, key[i].len);
+< 	break;
+<       }
+< 
+<       u_char *t = (u_char *) malloc(resolvable_media[j].len);
+<       memcpy(t, resolvable_media[j].data, resolvable_media[j].len);
+<       ngx_md5_update(&md5, t, resolvable_media[j].len); 
+<       ngx_crc32_update(&c->resolvable_crcs[j], t, resolvable_media[j].len);
+<       ngx_crc32_final(c->resolvable_crcs[j]);
+< 
+<       ngx_str_t *tmp = ngx_array_push(c->resolvable_keys);
+<       tmp->data = (u_char *) ngx_pcalloc(r->pool, NGX_HTTP_CACHE_KEY_LEN);
+<       tmp->len  = NGX_HTTP_CACHE_KEY_LEN;
+<       ngx_md5_final(tmp->data, &md5);
+<      
+<       ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 		     "http resolvable object key: \"%p\" \"%d\"", tmp->data, ret);
+<       
+<       len += resolvable_media[j].len;
+<       c->header_start_resolvables[j] = sizeof(ngx_http_file_cache_header_t) 
+< 	+ sizeof(ngx_http_file_cache_key) + len + 1;
+< 
+<       free(t);            
+<     }
+< }
+< 
+< 
+< 
+< 
+< /* void */
+< /* ngx_http_file_cache_create_alt_key(ngx_http_request_t *r) */
+< /* { */
+< 
+< /*     size_t             len; */
+< /*     ngx_str_t         *key; */
+< /*     ngx_uint_t         i; */
+< /*     ngx_md5_t          md5; */
+< /*     ngx_http_cache_t  *c; */
+< 
+< /*     c = r->cache; */
+< 
+< /*     len = 0; */
+< 
+< /*     ngx_md5_init(&md5); */
+< /*     ngx_crc32_init(c->alt_crc32);     */
+<         
+< /*     key = c->keys.elts; */
+< /*     for (i = 0; i < c->keys.nelts; i++) { */
+< /*         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, */
+< /*                        "http cache key: \"%V\" \"%d\"", &key[i], key[i].len); */
+< 
+< /*         len += key[i].len; */
+< /* 	ngx_crc32_update(&c->alt_crc32, key[i].data, key[i].len); */
+< /*         ngx_md5_update(&md5, key[i].data, key[i].len); */
+< /* 	break; */
+< /*     } */
+< 
+< /*     ngx_str_t alternate_object = r->headers_in.alternate_objects->value; */
+< /*     ngx_md5_update(&md5, alternate_objects.data, alternate_objects.len); */
+< /*     ngx_crc32_update(&c->alt_crc32, alternate_object.data, alternate_object.len); */
+< /*     ngx_crc32_final(c->alt_crc32); */
+< /*     len += alternate_object.len; */
+<     
+< /*     c->header_start_alt = sizeof(ngx_http_file_cache_header_t) */
+< /*       + sizeof(ngx_http_file_cache_key) + len + 1; */
+<      
+< /*     ngx_md5_final(c->alt_key, &md5); */
+< /* } */
+< 
+< 
+< void
+< ngx_http_file_cache_use_alt_key(ngx_http_cache_t *c, ngx_uint_t index)
+< {
+<   if (c->alt_keys != NULL){
+<     ngx_str_t *alt = c->alt_keys->elts;
+<     ngx_memcpy(c->key, alt[index].data, NGX_HTTP_CACHE_KEY_LEN);
+<     ngx_memcpy(c->alt_key, alt[index].data, NGX_HTTP_CACHE_KEY_LEN);
+<   }
+< 
+<   if (c->alt_crcs != NULL){
+<     c->crc32 = c->alt_crcs[index];
+<     c->alt_crc32 = c->alt_crcs[index];
+<   }
+<   
+<   if (c->header_start_alternatives != NULL){
+<     c->header_start = c->header_start_alternatives[index];
+<   }
+< }
+< 
+< void
+< ngx_http_file_cache_use_resolvable_key(ngx_http_cache_t *c, ngx_uint_t index)
+< {
+<   if (c->resolvable_keys != NULL){
+<     ngx_str_t *res = c->resolvable_keys->elts;
+<     ngx_memcpy(c->key, res[index].data, NGX_HTTP_CACHE_KEY_LEN);
+<     ngx_memcpy(c->resolvable_key, res[index].data, NGX_HTTP_CACHE_KEY_LEN);
+<   }
+< 
+<   if (c->resolvable_crcs != NULL){
+<     c->crc32 = c->resolvable_crcs[index];
+<     c->resolvable_crc32 = c->resolvable_crcs[index];
+<   }
+<   
+<   if (c->header_start_resolvables != NULL){
+<     c->header_start = c->header_start_resolvables[index];
+<   }
+< }
+< 
+< 
+< void
+< ngx_http_file_cache_key_reset(ngx_http_cache_t *c)
+< {
+<   ngx_memcpy(c->key, c->main, NGX_HTTP_CACHE_KEY_LEN);
+<   c->header_start = c->header_start_main;  
+< }
+< 
+< 
+626d336
+<     
+631d340
+<     
+829,831d537
+<     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 		   "AIO read length %d", n);
+<     
+850,883c556,561
+<     /* if (h->crc32 != c->crc32 || (size_t) h->header_start != c->header_start) { */
+<     /*     ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0, */
+<     /*                   "s1 cache file \"%s\" has md5 collision", c->file.name.data); */
+<     /*     return NGX_DECLINED; */
+<     /* } */
+<        
+< 
+<     if (h->crc32 != c->crc32){
+<       ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
+< 		    "use alt 0 s1 crc mismatch \"%s\"", c->file.name.data);
+<       return NGX_DECLINED;
+<     }
+<     
+<     if ((size_t) h->header_start != c->header_start){
+<       ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
+< 		    "use alt 0 s1 header mismatch \"%s\"", c->file.name.data);
+<       return NGX_DECLINED;
+<     }
+<     
+<     /*  } */
+<     /* else{ */
+<     /*   if (h->crc32 != c->alt_crc32){ */
+<     /*     ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0, */
+<     /* 		    "use alt 1 s1 crc mismatch \"%s\"", c->file.name.data); */
+<     /*     return NGX_DECLINED; */
+<     /*   } */
+< 
+<     /*   if ((size_t) h->header_start != c->header_start_alt){ */
+<     /*     ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0, */
+<     /* 		    "use alt 1 s1 header start mismatch \"%s\"", c->file.name.data); */
+<     /* 	return NGX_DECLINED; */
+<     /*   } */
+<     /* } */
+<             
+---
+>     if (h->crc32 != c->crc32 || (size_t) h->header_start != c->header_start) {
+>         ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
+>                       "cache file \"%s\" has md5 collision", c->file.name.data);
+>         return NGX_DECLINED;
+>     }
+> 
+887,893c565,570
+<     if (c->use_alternate == 0 && c->use_resolvable == 0){
+<        key = c->keys.elts;
+<        for (i = 0; i < c->keys.nelts; i++) {
+< 	 if (ngx_memcmp(p, key[i].data, key[i].len) != 0) {
+< 	   ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
+< 			 "s2 cache file \"%s\" has md5 collision",
+< 			 c->file.name.data);
+---
+>     key = c->keys.elts;
+>     for (i = 0; i < c->keys.nelts; i++) {
+>         if (ngx_memcmp(p, key[i].data, key[i].len) != 0) {
+>             ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
+>                           "cache file \"%s\" has md5 collision",
+>                           c->file.name.data);
+895c572
+< 	 }
+---
+>         }
+897,941c574
+< 	 p += key[i].len;
+<        }
+<     }
+<     else if (c->use_alternate > 0) {
+<          key = c->keys.elts;
+< 	 for (i = 0; i < c->keys.nelts; i++) {
+< 	   if (ngx_memcmp(p, key[i].data, key[i].len) != 0) {
+< 	     ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
+< 			 "use alt 1 check 1 cache file \"%s\" has md5 collision",
+< 			 c->file.name.data);
+< 	     return NGX_DECLINED;
+< 	   }
+< 	   p += key[i].len;
+< 	   break;
+< 	 }
+< 
+< 	 ngx_str_t *alt_media = r->headers_in.alternate_objects->elts;
+< 	 /* ngx_str_t alternate_object = r->headers_in.alternate_object->value; */
+< 	 if (ngx_memcmp(p, alt_media[c->use_alternate - 1].data, alt_media[c->use_alternate - 1].len) != 0) {
+< 	   ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
+< 			 "use alt 1 check 2 cache file \"%s\" has md5 collision",
+< 			 c->file.name.data);
+<             return NGX_DECLINED;
+< 	 }
+<     }    
+<     else if (c->use_resolvable > 0) {
+<          key = c->keys.elts;
+< 	 for (i = 0; i < c->keys.nelts; i++) {
+< 	   if (ngx_memcmp(p, key[i].data, key[i].len) != 0) {
+< 	     ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
+< 			 "use alt 1 check 1 cache file \"%s\" has md5 collision",
+< 			 c->file.name.data);
+< 	     return NGX_DECLINED;
+< 	   }
+< 	   p += key[i].len;
+< 	   break;
+< 	 }
+< 
+< 	 ngx_str_t *resolvable_media = r->headers_in.resolvable_objects->elts;
+< 	 if (ngx_memcmp(p, resolvable_media[c->use_resolvable - 1].data, resolvable_media[c->use_resolvable - 1].len) != 0) {
+< 	   ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
+< 			 "use alt 1 check 2 cache file \"%s\" has md5 collision",
+< 			 c->file.name.data);
+<             return NGX_DECLINED;
+< 	 }
+---
+>         p += key[i].len;
+950d582
+<     
+970c602
+<            
+---
+> 
+981d612
+<     
+1084,1086d714
+<     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+<                    "Anirudh I am here reading file %d", c->body_start);
+<     
+1199c827
+<     
+---
+> 
+1202,1234d829
+< 
+< 	// Look for alternate objects
+< 	if (fcn == NULL && c->alt_keys != NULL) {
+< 
+< 	  ngx_str_t *alt = c->alt_keys->elts;
+< 	  for(ngx_uint_t i=0; i < c->alt_keys->nelts; i++){
+< 
+< 	    fcn = ngx_http_file_cache_lookup(cache, alt[i].data);
+< 	    if (fcn != NULL){
+< 
+< 
+< 	      ngx_http_file_cache_use_alt_key(c, i);
+< 	      c->use_alternate = i+1;
+< 	      break;
+< 	    }
+< 	  }		
+< 	}
+< 
+< 	if (fcn == NULL && c->resolvable_keys != NULL) {
+< 	  
+< 	  ngx_str_t *alt = c->resolvable_keys->elts;
+< 	  for(ngx_uint_t i=0; i < c->resolvable_keys->nelts; i++){
+< 
+< 	    fcn = ngx_http_file_cache_lookup(cache, alt[i].data);
+< 	    
+< 	    if (fcn != NULL){
+< 
+< 	      ngx_http_file_cache_use_resolvable_key(c, i);	      
+< 	      c->use_resolvable = i+1;
+< 	      break;
+< 	    }
+< 	  }		
+< 	}	
+1260c855
+< 	      c->body_start = fcn->body_start;
+---
+>                 c->body_start = fcn->body_start;
+1379,1382d973
+<     ngx_log_error(NGX_LOG_ALERT, ngx_cycle->log, 0,
+< 		  "sabby inside cache lookup");
+< 
+<     
+1658a1250,1252
+>     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+>                    "http file cache set header");
+> 
+1924d1517
+<     

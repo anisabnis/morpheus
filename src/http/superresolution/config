@@ -1,0 +1,21 @@
+ngx_addon_name=ngx_http_superresolution_module
+HTTP_FILTER_MODULES="$HTTP_FILTER_MODULES ngx_http_superresolution_module"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_superresolution_module.c"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_superresolution_image.cpp"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_superresolution_video.cpp"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_superresolution_util.cpp"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/dlib_unix.cpp"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/monitor.cpp"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/nvml.cpp"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/utils.cpp"
+NGX_ADDON_DEPS="$NGX_ADDON_DEPS $ngx_addon_dir/ngx_http_superresolution_util.hpp"
+NGX_ADDON_DEPS="$NGX_ADDON_DEPS $ngx_addon_dir/dlib.h"
+NGX_ADDON_DEPS="$NGX_ADDON_DEPS $ngx_addon_dir/dlib_unix.h"
+NGX_ADDON_DEPS="$NGX_ADDON_DEPS $ngx_addon_dir/monitor.h"
+NGX_ADDON_DEPS="$NGX_ADDON_DEPS $ngx_addon_dir/nvml.h"
+NGX_ADDON_DEPS="$NGX_ADDON_DEPS $ngx_addon_dir/utils.h"
+ONNXRUNTIME_DIR=/opt/onnxruntime-linux-x64-gpu-1.16.3
+CFLAGS="$CFLAGS -I$ONNXRUNTIME_DIR/include"
+ngx_feature_libs="-lstdc++ -lcrypt -lopencv_highgui -lopencv_imgproc -lopencv_dnn -lopencv_core -lopencv_videoio -lopencv_imgcodecs -lopencv_dnn_superres  -lavcodec -lavformat -lavutil -lavcodec -lavformat -lavutil -lm -lswresample -lswscale -lva -lva-x11 -lvdpau -llzma -lva-drm  -lX11 -lpthread -lm -lz -lx264 -lcrypt -lpcre2-8 -lgnutls -L$ONNXRUNTIME_DIR/lib -lonnxruntime -Wl,-rpath,$ONNXRUNTIME_DIR/lib"
+CORE_LIBS="$CORE_LIBS $ngx_feature_libs"
+

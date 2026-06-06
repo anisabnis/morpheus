@@ -1,0 +1,382 @@
+#include <nginx.h>
+#include <ngx_config.h>
+#include <ngx_core.h>
+#include <ngx_http.h>
+
+ngx_module_t ngx_http_superresolution_module;
+
+static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
+static ngx_http_output_body_filter_pt   ngx_http_next_body_filter;
+
+ngx_int_t ngx_http_superresolution_scale_video(ngx_http_request_t *r, ngx_chain_t *in, ngx_chain_t *onnx, u_char* buf, int buflen, ngx_str_t *cache_file_name, size_t content_start);
+ngx_int_t ngx_http_superresolution_scale_image(ngx_http_request_t *r, ngx_chain_t *in, char* buf, int buflen);
+ngx_int_t ngx_http_superresolution_delete_alternate_file(ngx_http_request_t *r);
+ngx_int_t ngx_http_superresolution_get_scale(ngx_http_request_t *r);
+
+ngx_atomic_t compute_queue_size0;
+static ngx_atomic_t *compute_queue_size = &compute_queue_size0;  
+
+
+ngx_int_t get_compute_queue_size() 
+{
+  return *compute_queue_size;
+}
+
+void update_compute_queue_size(ngx_int_t tm)
+{
+  (void) ngx_atomic_fetch_add(compute_queue_size, tm);
+}
+
+static ngx_int_t
+ngx_http_superresolution_header_filter(ngx_http_request_t *r)
+{
+
+  r->content_size = r->headers_out.content_length_n;
+  
+  if (r->cache != NULL){
+    ngx_http_clear_content_length(r);
+  }
+  
+  return ngx_http_next_header_filter(r);
+}
+
+typedef struct {
+  ngx_chain_t    *in;
+} ngx_http_superresolution_ctx_t;
+
+
+ngx_int_t
+ngx_http_file_cache_name_main_key(ngx_http_request_t *r, ngx_str_t *name)
+{
+  u_char *p;
+  ngx_http_cache_t *c = r->cache;
+  ngx_path_t *path    = c->file_cache->path;
+  
+  name->len = path->name.len + 1 + path->len
+    + 2 * NGX_HTTP_CACHE_KEY_LEN;
+
+  name->data = ngx_pnalloc(r->pool, name->len + 1);
+  if (name->data == NULL){
+    return NGX_ERROR;
+  }
+
+  ngx_memcpy(name->data, path->name.data, path->name.len);
+  
+  p = name->data + path->name.len + 1 + path->len;
+  p = ngx_hex_dump(p, c->main, NGX_HTTP_CACHE_KEY_LEN);
+  *p = '\0';
+
+  ngx_create_hashed_filename(path, name->data, name->len);  
+  return NGX_OK;
+}
+
+
+
+static ngx_int_t
+ngx_http_superresolution_scale_video_from_subrequest(ngx_http_request_t *sr, ngx_http_request_t *r, ngx_chain_t **in, size_t content_start){
+  
+  // Copy the above *in into a temporary buffer
+  // cl now points to an onnx model
+  ngx_int_t ret = NGX_OK;
+  ngx_chain_t *cl = *in;
+  
+  // Copy ctx[in] into the above *in
+  // in now points to video segment
+  ngx_http_superresolution_ctx_t   *ctx;
+  ctx = ngx_http_get_module_ctx(r, ngx_http_superresolution_module);
+  *in = ctx->in; 
+  if (ctx->in->buf->in_file == 0){
+    return NGX_DECLINED;
+  }
+
+  ngx_str_t cache_file_name;
+  ret = ngx_http_file_cache_name_main_key(r, &cache_file_name);   
+  
+  // 3. Call ngx_http_superresolution_scale_video
+  // Read the video content from file. Would this change?
+  size_t buffer_size;
+  int n = 0;
+  u_char *buf;
+  
+  buffer_size = ctx->in->buf->file_last - ctx->in->buf->file_pos;
+  buf = (u_char *) malloc(ctx->in->buf->file_last - ctx->in->buf->file_pos);
+  n = ngx_read_file(ctx->in->buf->file, (u_char *) buf, buffer_size, ctx->in->buf->file_pos);
+
+  if (n <= 0){
+    return NGX_DECLINED;
+  }
+  
+  ret = ngx_http_superresolution_scale_video(sr, ctx->in, cl, buf, buffer_size, &cache_file_name, content_start);
+  
+  if (ret == NGX_DECLINED){
+    return NGX_DECLINED;
+  }
+
+  return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_superresolution_handler(ngx_http_request_t *r, ngx_chain_t *in)
+{
+
+  // This is the second level request i.e., sub sub request.
+  if (r != r->main &&
+      r->parent != r->main){
+
+    if (r->subsubrequestdone == 1){
+      return ngx_http_next_body_filter(r, in);
+    }
+
+    r->subsubrequestdone = 1;
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby, subsubrequest!!");
+    
+    ngx_int_t ret = NGX_OK;
+    ret = ngx_http_superresolution_delete_alternate_file(r);
+
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby, subsubrequest %d!!", ret);
+    
+    if (ret == NGX_DECLINED){
+      return ngx_http_next_body_filter(r, in);
+    }
+    
+    return ngx_http_next_body_filter(r, in);
+  }
+  
+  // This code is part of the sub-request.
+  if (r != r->main &&
+      r->parent != NULL){
+
+      if(r->subrequestdone){
+        return ngx_http_next_body_filter(r, in) ;
+      }
+
+
+      if (in->buf->in_file == 1 &&
+	      r->upstream->cache_status == NGX_HTTP_CACHE_MISS){
+
+        if (r->body_start == 0){
+	        r->body_start = in->buf->file_pos;
+        }
+
+        ngx_chain_t *cl = in;
+        while(cl->next != NULL){
+	        cl = cl->next;
+        }
+      
+        if (cl->buf->file_last >= r->content_size){
+
+	        r->subrequestdone = 1;
+	        ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby got all bytes from forward side ");
+		
+	        ngx_int_t ret = ngx_http_superresolution_scale_video_from_subrequest(r, r->parent, &in, r->body_start);
+
+	        ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby came back after super-resolving %d %d %d", ret, NGX_OK, NGX_DECLINED);
+		
+	        if (ret == NGX_DECLINED){
+	          return ngx_http_next_body_filter(r, in);
+	        }
+        }
+        else {
+
+	        u_char *buf = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char));
+	        *buf = 'A';
+
+	        ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby setting subrequest buffer to A");
+		
+	        ngx_buf_t *tmpbuf;
+	        tmpbuf = (ngx_buf_t *) ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+
+	        if (tmpbuf == NULL) {
+	          return NGX_DECLINED;
+	        }
+
+		
+	        tmpbuf->pos = buf;
+	        tmpbuf->last = tmpbuf->pos + sizeof(u_char);
+	        tmpbuf->start = tmpbuf->pos;
+	        tmpbuf->end = tmpbuf->last;
+	        tmpbuf->last_buf = 1;
+	        tmpbuf->memory = 1;
+	        cl->buf = tmpbuf;         	
+        }
+    }
+    else{
+      r->subrequestdone = 1;
+      ngx_int_t ret = ngx_http_superresolution_scale_video_from_subrequest(r, r->parent, &in, 0);  
+
+      if (ret == NGX_DECLINED){
+	      return ngx_http_next_body_filter(r, in);
+      }
+    }
+    return ngx_http_next_body_filter(r, in);
+  }
+  
+  if (r->main->internal) {    
+    return ngx_http_next_body_filter(r, in) ;
+  }
+
+  // This code is part of the main request.
+  // The main request (i) invokes a subrequest and (ii) clears the linked list of buffers  
+  r->main->internal = 1;
+  
+  ngx_str_t            uri;
+  ngx_http_request_t  *sr;
+  ngx_int_t            rc;
+
+
+  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby, internal request, internal request!!");
+
+  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby is back!!");
+
+
+  if (r->cache == NULL){
+    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "r->cache is NULL!!");
+  }
+
+  if (in->buf->in_file != 1){
+    ngx_chain_t *cl = in;
+        while(cl != NULL){
+          ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "in->buf-in_file != 1!! %d %d %d %d", cl->buf->last - cl->buf->pos, 
+          cl->buf->memory, r->content_size, r->content_size);
+	        cl = cl->next;
+        }
+  }
+
+  /* if (in->buf != NULL && */
+  /*     in->buf->in_file == 1 && */
+  /*     r->upstream->cache_status == NGX_HTTP_CACHE_MISS) { */
+  /*   ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby, internal request got all content!!"); */
+  /* } */
+  
+  /*if(in->buf->in_file == 1 &&
+     r->upstream &&
+     r->upstream->cache_status == NGX_HTTP_CACHE_HIT &&
+     r->cache &&
+     r->cache->use_resolvable &&
+     r == r->main){*/
+
+
+  if(in->buf->in_file == 1 &&   
+      r->upstream &&
+      ((r->cache &&  // Cache hit and resolve 
+      r->cache->use_resolvable > 0 && 
+      r->upstream->cache_status == NGX_HTTP_CACHE_HIT) || 
+      (r->upstream->cache_status == NGX_HTTP_CACHE_MISS && r->resolvable_from_origin > 0)) && // Cache miss and resolve
+      r == r->main){
+
+    if(r->upstream->cache_status == NGX_HTTP_CACHE_HIT) {
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby Sabby, main request here on a cache hit");
+    }
+    // If it is a cache miss, then return next filter till it is the last buf
+    if (in->buf->in_file == 1 &&
+        r->upstream &&
+        r->upstream->cache_status == NGX_HTTP_CACHE_MISS) {
+
+        if (r->body_start == 0) {
+          r->body_start = in->buf->file_pos;
+        }
+
+        ngx_chain_t *cl = in;
+        while(cl->next != NULL){
+	        cl = cl->next;
+        }
+
+        if(cl->buf->file_last >= r->content_size) {
+          ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Sabby, internal request got all content in file!! %d %d %d", r->body_start, r->content_size, in->buf->file_pos);
+        } else {
+          return ngx_http_next_body_filter(r, in); 
+      }   
+    }
+
+    ngx_uint_t scale_w = ngx_http_superresolution_get_scale(r);
+
+    // Make a nginx subrequest if we need to upsample.
+    if (r->headers_in.superresolution_model.data != NULL && scale_w > 100){
+      uri = r->headers_in.superresolution_model;
+    }
+    else{
+      // Default super-resolution module
+      ngx_str_set(&uri, "/espcn.pb");
+    }
+
+    rc = ngx_http_subrequest(r, &uri, NULL, &sr, NULL, 0);
+    if(rc == NGX_ERROR){
+      return NGX_ERROR;
+    }    
+
+    // Copy the main request buffer to context class
+    ngx_http_superresolution_ctx_t   *ctx;
+    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_superresolution_ctx_t));        
+    if (ctx == NULL){
+      return NGX_ERROR;
+    }
+    
+    if (in) {
+      if (ngx_chain_add_copy(r->pool, &ctx->in, in) != NGX_OK) {
+	      return NGX_ERROR;
+      }
+    }    
+
+    ngx_http_set_ctx(r, ctx, ngx_http_superresolution_module);                     
+
+    u_char *buf = (u_char *) ngx_pcalloc(r->pool, sizeof(u_char));
+    *buf = 'A';
+    
+    ngx_buf_t *tmpbuf;
+    tmpbuf = (ngx_buf_t *) ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+
+    if (tmpbuf == NULL) {
+      return NGX_DECLINED;
+    }
+
+    tmpbuf->pos = buf;
+    tmpbuf->last = tmpbuf->pos + sizeof(u_char);
+    tmpbuf->start = tmpbuf->pos;
+    tmpbuf->end = tmpbuf->last;
+    tmpbuf->last_buf = 1;
+    tmpbuf->memory = 1;
+    in->buf = tmpbuf;         
+  }
+
+  return ngx_http_next_body_filter(r, in);  
+}    
+
+
+static ngx_int_t
+ngx_http_superresolution_init(ngx_conf_t *cf)
+{
+  ngx_http_next_header_filter = ngx_http_top_header_filter;
+  ngx_http_top_header_filter  = ngx_http_superresolution_header_filter;
+  
+  ngx_http_next_body_filter = ngx_http_top_body_filter;
+  ngx_http_top_body_filter  = ngx_http_superresolution_handler;
+  
+  return NGX_OK;
+}
+
+static ngx_http_module_t ngx_http_superresolution_module_ctx = {
+  NULL,     /* preconfiguration */
+  ngx_http_superresolution_init,              /* postconfiguration */
+  NULL,                                       /* create main configuration */
+  NULL,                                       /* init main configuration */
+  NULL,                                       /* create server configuration */
+  NULL,                                       /* merge server configuration */
+  NULL,                                       /* create location configuration */
+  NULL
+};
+
+ngx_module_t ngx_http_superresolution_module = {
+  NGX_MODULE_V1,
+  &ngx_http_superresolution_module_ctx, /* module context */
+  NULL,                            /* module directives */
+  NGX_HTTP_MODULE,                 /* module type */
+  NULL,                            /* init master */
+  NULL,                            /* init module */
+  NULL,                            /* init process */
+  NULL,                            /* init thread */
+  NULL,                            /* exit thread */
+  NULL,                            /* exit process */
+  NULL,                            /* exit master */
+  NGX_MODULE_V1_PADDING
+};

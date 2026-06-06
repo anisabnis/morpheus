@@ -1,0 +1,79 @@
+1c1,3
+< /*(C) Igor Sysoev
+---
+> 
+> /*
+>  * Copyright (C) Igor Sysoev
+803,807d804
+<     int ij = 0;
+<     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+<                    "sabby check if it is in cache open function http upstream cache: %d", ij);
+< 
+< 
+815c812
+< 	
+---
+> 
+833,834d829
+< 	//ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 	//	       "Before crash");
+836,872c831,832
+< 	
+< 	ngx_str_t *tmpp = r->headers_in.alternate_objects->elts;
+< 	for(ngx_uint_t count=0; count < r->headers_in.alternate_objects->nelts; count++){
+< 	  ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 			 "find number of elements in Alternate objects Anirudh : %s %d", tmpp[count].data, tmpp[count].len);
+< 	}
+< 
+< 
+< 	/* ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, */
+< 	/* 		 "find number of elements in Media resolution Anirudh : %s %d", r->headers_in.resolution.data, r->headers_in.resolution.len); */
+< 
+< 	
+< 	tmpp = r->headers_in.resolvable_objects->elts;
+< 	for(ngx_uint_t count=0; count < r->headers_in.resolvable_objects->nelts; count++){
+< 	  ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 			 "find number of elements in Resolvable objects Anirudh : %s %d", tmpp[count].data, tmpp[count].len);
+< 	}
+< 
+< 	tmpp = r->headers_in.resolvable_resolutions->elts;
+< 	for(ngx_uint_t count=0; count < r->headers_in.resolvable_resolutions->nelts; count++){
+< 	  ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 			 "find number of elements in Resolvable resolutions Anirudh : %s %d", tmpp[count].data, tmpp[count].len);
+< 	}
+< 
+< 	
+< 	ngx_http_file_cache_create_key(r);
+< 	if (r->headers_in.resolvable_objects != NULL && r->headers_in.resolution.len > 0){
+< 	  ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+< 			 "sabby we have resolvable objects: %i", rc);
+< 
+< 	  ngx_http_file_cache_create_resolved_keys(r);
+< 	}
+< 
+< 	if (r->headers_in.alternate_objects != NULL){
+< 	  ngx_http_file_cache_create_alternate_keys(r);
+< 	}
+< 	
+---
+>         ngx_http_file_cache_create_key(r);
+> 
+913a874,876
+>     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+>                    "http upstream cache: %i", rc);
+> 
+944d906
+< 
+1020d981
+< 	
+1041c1002
+<         {	  
+---
+>         {
+2500,2501c2461,2463
+<             r->cache->date = now;		    
+< 	    
+---
+> 
+>             r->cache->date = now;
+> 

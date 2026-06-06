@@ -1,0 +1,37 @@
+68,69d67
+< 
+<   // The CRCs that were finally used
+71,78d68
+<     uint32_t                         alt_crc32;
+<     uint32_t                         resolvable_crc32;
+< 
+<   // The CRCs of the alternate objects
+<     uint32_t                         *alt_crcs;
+<     uint32_t                         *resolvable_crcs;
+<     
+<   // The Cache keys that were finally used
+81,82d70
+<     u_char                           alt_key[NGX_HTTP_CACHE_KEY_LEN];
+<     u_char                           resolvable_key[NGX_HTTP_CACHE_KEY_LEN];
+84,87d71
+<   // The cache keys of the alternate objects: these should be copied over to alt_key and freed
+<     ngx_array_t                       *alt_keys;
+<     ngx_array_t                       *resolvable_keys;
+<   
+100,103d83
+<     size_t                           header_start_main;
+<     size_t                           header_start_alt;  
+<     size_t                           *header_start_alternatives;
+<     size_t                           *header_start_resolvables;
+112,114c92
+<     ngx_uint_t                       use_alternate;
+<     ngx_uint_t                       use_resolvable; 
+<   
+---
+> 
+212,214d189
+< void ngx_http_file_cache_create_alt_key(ngx_http_request_t *r);
+< void ngx_http_file_cache_create_alternate_keys(ngx_http_request_t *r);
+< void ngx_http_file_cache_create_resolved_keys(ngx_http_request_t *r);
+218d192
+< 

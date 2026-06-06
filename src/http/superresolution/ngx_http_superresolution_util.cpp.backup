@@ -1,0 +1,183 @@
+#include "ngx_http_superresolution_util.hpp"
+
+void preprocess_YCrCb(InputArray inpImg, OutputArray outImg)
+{
+    if ( inpImg.type() == CV_8UC1 )
+    {
+        inpImg.getMat().convertTo(outImg, CV_32F, 1.0 / 255.0);
+    }
+    else if ( inpImg.type() == CV_32FC1 )
+    {
+        inpImg.getMat().convertTo(outImg, CV_32F, 1.0 / 255.0);
+    }
+    else if ( inpImg.type() == CV_32FC3 )
+    {
+        Mat img_float;
+        inpImg.getMat().convertTo(img_float, CV_32F, 1.0 / 255.0);
+        cvtColor(img_float, outImg, COLOR_BGR2YCrCb);
+    }
+    else if ( inpImg.type() == CV_8UC3 )
+    {
+        Mat ycrcb;
+        cvtColor(inpImg, ycrcb, COLOR_BGR2YCrCb);
+        ycrcb.convertTo(outImg, CV_32F, 1.0 / 255.0);
+    }
+    else
+    {
+        CV_Error(Error::StsBadArg, String("Not supported image type: ") + typeToString(inpImg.type()));
+    }
+}
+
+void reconstruct_YCrCb(InputArray inpImg, InputArray origImg, OutputArray outImg, int scale)
+{
+    if ( origImg.type() == CV_32FC3 )
+    {
+        Mat orig_channels[3];
+        split(origImg.getMat(), orig_channels);
+
+        Mat Cr, Cb;
+        cv::resize(orig_channels[1], Cr, cv::Size(), scale, scale);
+        cv::resize(orig_channels[2], Cb, cv::Size(), scale, scale);
+
+        std::vector <Mat> channels;
+        channels.push_back(inpImg.getMat());
+        channels.push_back(Cr);
+        channels.push_back(Cb);
+
+        Mat merged_img;
+        merge(channels, merged_img);
+
+        Mat merged_8u_img;
+        merged_img.convertTo(merged_8u_img, CV_8U, 255.0);
+
+        cvtColor(merged_8u_img, outImg, COLOR_YCrCb2BGR);
+    }
+    else if ( origImg.type() == CV_32FC1 )
+    {
+        inpImg.getMat().convertTo(outImg, CV_8U, 255.0);
+    }
+    else
+    {
+        CV_Error(Error::StsBadArg, String("Not supported image type: ") + typeToString(origImg.type()));
+    }
+}
+
+
+ngx_dims_t
+ngx_http_superresolution_file_cache_get_dimensions(ngx_str_t resolution, ngx_log_t *log)
+{
+  u_char *m, *n;
+  m = n = resolution.data;
+  ngx_dims_t dim;
+  dim.width = -1;
+  dim.height = -1;
+
+  for (size_t i=0; i < resolution.len; i++){
+    if(m != NULL && (*m == 'x' || *m == 'X')){
+      dim.width = ngx_atoi(n, m-n);
+      n = m+1;
+    }
+    ++m;
+  }
+
+  if (m > n){
+    dim.height = ngx_atoi(n, m-n);
+  }
+  return dim;
+}
+
+
+Mat upscaleImage(Mat img, string modelName, string modelPath, int scale, ngx_http_request_t *r){  
+  DnnSuperResImpl sr;
+  sr.readModel(modelPath);
+  sr.setModel(modelName,scale);
+  Mat outputImage;
+  sr.upsample(img, outputImage);
+  return outputImage;
+}
+
+Mat upscaleImageFromONNX(Mat imageBGR, Net net, int scale, ngx_http_request_t *r){
+
+  cv::Mat preproc_img;
+  preprocess_YCrCb(imageBGR, preproc_img);
+  
+  Mat ycbcr_channels[3];
+  split(preproc_img, ycbcr_channels);
+  
+  Mat Y = ycbcr_channels[0];
+  
+  cv::Mat blob;
+  dnn::blobFromImage(Y, blob, 1.0);
+
+  net.setInput(blob);
+  cv::Mat blob_output = net.forward();
+
+  std::vector <Mat> model_outs;
+  dnn::imagesFromBlob(blob_output, model_outs);
+  Mat out_img = model_outs[0];
+
+  //Reconstruct: upscale the Cr and Cb space and merge the three layer
+  cv::Mat result;
+  reconstruct_YCrCb(out_img, preproc_img, result, scale);
+
+  return result;
+}
+
+
+std::vector<cv::Mat> upscaleBatchFromONNX(
+    const std::vector<cv::Mat> &images, cv::dnn::Net &net, float scale, ngx_http_request_t *r)
+{
+    if (images.empty()) return {};
+
+    int h = images[0].rows;
+    int w = images[0].cols;
+    int out_h = (int)(h * scale);
+    int out_w = (int)(w * scale);
+
+    // Extract Y channel from each frame and upscale CrCb with bicubic
+    std::vector<cv::Mat> y_channels(images.size());
+    std::vector<cv::Mat> upscaled_crcb(images.size());
+
+    for (size_t i = 0; i < images.size(); i++) {
+        cv::Mat ycrcb;
+        cv::cvtColor(images[i], ycrcb, cv::COLOR_BGR2YCrCb);
+
+        std::vector<cv::Mat> channels(3);
+        cv::split(ycrcb, channels);
+
+        // Y channel as float normalized [0,1]
+        channels[0].convertTo(y_channels[i], CV_32FC1, 1.0 / 255.0);
+
+        // Upscale CrCb with bicubic (cheap, only SR on Y)
+        cv::Mat crcb;
+        std::vector<cv::Mat> crcb_channels = {channels[1], channels[2]};
+        cv::merge(crcb_channels, crcb);
+        cv::resize(crcb, upscaled_crcb[i], cv::Size(out_w, out_h), 0, 0, cv::INTER_CUBIC);
+    }
+
+    // Build blob from Y channels: [N, 1, H, W]
+    cv::Mat blob = cv::dnn::blobFromImages(y_channels, 1.0, cv::Size(), cv::Scalar(), false, false, CV_32F);
+
+    net.setInput(blob);
+    cv::Mat output = net.forward(); // shape: [N, 1, H*scale, W*scale]
+
+    std::vector<cv::Mat> results(images.size());
+    for (size_t i = 0; i < images.size(); i++) {
+        // Extract Y output for frame i
+        cv::Mat y_out(out_h, out_w, CV_32FC1, output.ptr<float>(i, 0));
+        cv::Mat y_out_8u;
+        y_out.convertTo(y_out_8u, CV_8UC1, 255.0);
+
+        // Merge SR'd Y with bicubic CrCb
+        std::vector<cv::Mat> crcb_channels(2);
+        cv::split(upscaled_crcb[i], crcb_channels);
+
+        std::vector<cv::Mat> merged_channels = {y_out_8u, crcb_channels[0], crcb_channels[1]};
+        cv::Mat ycrcb_out;
+        cv::merge(merged_channels, ycrcb_out);
+
+        cv::cvtColor(ycrcb_out, results[i], cv::COLOR_YCrCb2BGR);
+    }
+
+    return results;
+}

@@ -1,0 +1,873 @@
+diff --git a/objs/Makefile b/objs/Makefile
+index b951247..8f22d75 100644
+--- a/objs/Makefile
++++ b/objs/Makefile
+@@ -100,7 +100,7 @@ HTTP_INCS = -I src/http \
+ 	-I src/http/modules
+ 
+ 
+-ADDON_DEPS = $(CORE_DEPS)  $(HTTP_DEPS)
++ADDON_DEPS = $(CORE_DEPS)  /Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_superresolution_util.hpp $(HTTP_DEPS)
+ 
+ 
+ build:	binary modules manpage
+@@ -223,7 +223,9 @@ objs/nginx:	objs/src/core/nginx.o \
+ 	objs/src/http/modules/ngx_http_upstream_keepalive_module.o \
+ 	objs/src/http/modules/ngx_http_upstream_zone_module.o \
+ 	objs/addon/superresolution/ngx_http_superresolution_module.o \
+-	objs/addon/superresolution/ngx_http_use_cpp_superresolution.o \
++	objs/addon/superresolution/ngx_http_superresolution_image.o \
++	objs/addon/superresolution/ngx_http_superresolution_video.o \
++	objs/addon/superresolution/ngx_http_superresolution_util.o \
+ 	objs/ngx_modules.o
+ 
+ 	$(LINK) -o objs/nginx \
+@@ -343,9 +345,11 @@ objs/nginx:	objs/src/core/nginx.o \
+ 	objs/src/http/modules/ngx_http_upstream_keepalive_module.o \
+ 	objs/src/http/modules/ngx_http_upstream_zone_module.o \
+ 	objs/addon/superresolution/ngx_http_superresolution_module.o \
+-	objs/addon/superresolution/ngx_http_use_cpp_superresolution.o \
++	objs/addon/superresolution/ngx_http_superresolution_image.o \
++	objs/addon/superresolution/ngx_http_superresolution_video.o \
++	objs/addon/superresolution/ngx_http_superresolution_util.o \
+ 	objs/ngx_modules.o \
+-	-lstdc++ -lopencv_highgui -lopencv_imgproc -lopencv_dnn -lopencv_core -lopencv_videoio -lopencv_imgcodecs -lopencv_dnn_superres -lpcre -lz
++	-lstdc++ -lopencv_highgui -lopencv_imgproc -lopencv_dnn -lopencv_core -lopencv_videoio -lopencv_imgcodecs -lopencv_dnn_superres -lavutil -lavcodec -lswscale -lavformat -lpcre -lz
+ 	
+ 
+ 
+@@ -1170,11 +1174,25 @@ objs/addon/superresolution/ngx_http_superresolution_module.o:	$(ADDON_DEPS) \
+ 		/Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_superresolution_module.c
+ 
+ 
+-objs/addon/superresolution/ngx_http_use_cpp_superresolution.o:	$(ADDON_DEPS) \
+-	/Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_use_cpp_superresolution.cpp
+-	$(CC) -c $(CFLAGS)  -std=c++11 $(ALL_INCS) \
+-		-o objs/addon/superresolution/ngx_http_use_cpp_superresolution.o \
+-		/Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_use_cpp_superresolution.cpp
++objs/addon/superresolution/ngx_http_superresolution_image.o:	$(ADDON_DEPS) \
++	/Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_superresolution_image.cpp
++	$(CC) -c $(CFLAGS) -std=c++11 $(ALL_INCS) \
++		-o objs/addon/superresolution/ngx_http_superresolution_image.o \
++		/Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_superresolution_image.cpp
++
++
++objs/addon/superresolution/ngx_http_superresolution_video.o:	$(ADDON_DEPS) \
++	/Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_superresolution_video.cpp
++	$(CC) -c $(CFLAGS) -std=c++11 $(ALL_INCS) \
++		-o objs/addon/superresolution/ngx_http_superresolution_video.o \
++		/Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_superresolution_video.cpp
++
++
++objs/addon/superresolution/ngx_http_superresolution_util.o:	$(ADDON_DEPS) \
++	/Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_superresolution_util.cpp
++	$(CC) -c $(CFLAGS) -std=c++11 $(ALL_INCS) \
++		-o objs/addon/superresolution/ngx_http_superresolution_util.o \
++		/Users/ansabni/Research/nginx/nginx/src/http/superresolution/ngx_http_superresolution_util.cpp
+ 
+ 
+ manpage:	objs/nginx.8
+diff --git a/objs/addon/superresolution/ngx_http_superresolution_module.o b/objs/addon/superresolution/ngx_http_superresolution_module.o
+index 3d951f1..406d9ac 100644
+Binary files a/objs/addon/superresolution/ngx_http_superresolution_module.o and b/objs/addon/superresolution/ngx_http_superresolution_module.o differ
+diff --git a/objs/addon/superresolution/ngx_http_use_cpp_superresolution.o b/objs/addon/superresolution/ngx_http_use_cpp_superresolution.o
+deleted file mode 100644
+index e5046d2..0000000
+Binary files a/objs/addon/superresolution/ngx_http_use_cpp_superresolution.o and /dev/null differ
+diff --git a/objs/autoconf.err b/objs/autoconf.err
+index 52b32cf..dddf22f 100644
+--- a/objs/autoconf.err
++++ b/objs/autoconf.err
+@@ -4,10 +4,6 @@
+ checking for C compiler
+ 
+ 
+-----------------------------------------
+-checking for --with-ld-opt="-lstdc++"
+-
+-
+ ----------------------------------------
+ checking for -Wl,-E switch
+ 
+@@ -25,7 +21,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++ -Wl,-E
++cc -pipe -o objs/autotest objs/autotest.c -Wl,-E
+ ----------
+ 
+ ----------------------------------------
+@@ -144,7 +140,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -170,7 +166,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -195,7 +191,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -217,7 +213,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -247,7 +243,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -285,7 +281,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -311,7 +307,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -333,7 +329,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -356,7 +352,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -379,7 +375,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -402,7 +398,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -433,7 +429,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -457,7 +453,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -483,7 +479,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -529,7 +525,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -558,7 +554,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -580,7 +576,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -602,7 +598,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -696,7 +692,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -744,7 +740,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++
++cc -pipe -o objs/autotest objs/autotest.c
+ ----------
+ 
+ ----------------------------------------
+@@ -843,7 +839,7 @@ int main(void) {
+ }
+ 
+ ----------
+-cc -pipe -o objs/autotest objs/autotest.c -lstdc++ -lrt
++cc -pipe -o objs/autotest objs/autotest.c -lrt
+ ----------
+ 
+ ----------------------------------------
+diff --git a/objs/nginx b/objs/nginx
+index 9d039fe..ce4e5fe 100755
+Binary files a/objs/nginx and b/objs/nginx differ
+diff --git a/objs/ngx_auto_config.h b/objs/ngx_auto_config.h
+index 5c3a00a..629e8b3 100644
+--- a/objs/ngx_auto_config.h
++++ b/objs/ngx_auto_config.h
+@@ -1,4 +1,4 @@
+-#define NGX_CONFIGURE " --with-ld-opt=-lstdc++ --with-debug --add-module=/Users/ansabni/Research/nginx/nginx/src/http/superresolution"
++#define NGX_CONFIGURE " --with-debug --add-module=/Users/ansabni/Research/nginx/nginx/src/http/superresolution"
+ 
+ #ifndef NGX_DEBUG
+ #define NGX_DEBUG  1
+diff --git a/objs/src/core/nginx.o b/objs/src/core/nginx.o
+index b690902..741510f 100644
+Binary files a/objs/src/core/nginx.o and b/objs/src/core/nginx.o differ
+diff --git a/out.png b/out.png
+index 81eba2a..df91508 100644
+Binary files a/out.png and b/out.png differ
+diff --git a/src/http/superresolution/README.md b/src/http/superresolution/README.md
+deleted file mode 100644
+index 042a45b..0000000
+--- a/src/http/superresolution/README.md
++++ /dev/null
+@@ -1,129 +0,0 @@
+-# HTTP Footer filter module for Nginx
+-
+-## Introduction
+-
+-This is a module that is distributed with
+-[tengine](http://tengine.taobao.org) which is a distribution of
+-[Nginx](http://nginx.org) that is used by the e-commerce/auction site
+-[Taobao.com](http://en.wikipedia.org/wiki/Taobao). This distribution
+-contains some modules that are new on the Nginx scene. The
+-`ngx_http_footer_filter` module is one of them.
+-
+-This module implements a body filter that adds a given string to the
+-page footer.
+-
+-You might say that it provides a particular case of the
+-[http sub module](http://wiki.nginx.org/HttpSubModule) in the sense
+-that it adds something to the footer. You can do the same using the
+-`http sub module` but using the footer filter should be faster since
+-there's no string matching done on the request body.
+-
+-## Configuration example
+-
+-    location / {
+-        ## Using the $date_gmt variable from the SSI module (prints a
+-        ## UNIX timestamp).
+-        footer "<!-- $date_gmt -->";
+-        index index.html;
+-    }
+-
+-    location ^~ /assets/css {
+-        ## Add CSS to the MIME types to be added a footer.
+-        footer_types text/css; 
+-    
+-        footer "/* host: $server_name - $date_local */";
+-    }
+-
+-## Module directives
+-
+-**footer** `string`
+-
+-**default:** ``
+-
+-**context:** `http, server, location`
+-
+-It defines the string to be printed at the footer of the request
+-body. This string can have variables embedded.
+-
+-<br/>
+-<br/>
+-
+-**footer_types** `MIME types`
+-
+-**default:** `footer_types: text/html`
+-
+-**context:** `http, server, location`
+-
+-Defines the [MIME types](http://en.wikipedia.org/wiki/MIME_type) of
+-the files where the footer will be included.
+-
+-## Installation
+-
+- 1. Clone the git repo.
+-    
+-        git clone  git://github.com/taobao/nginx-http-footer-filter.git
+-
+- 2. Add the module to the build configuration by adding
+-    `--add-module=/path/to/nginx-http-footer-filter`.
+-
+- 3. Build the nginx binary.
+- 
+- 4. Install the nginx binary.
+- 
+- 5. Configure contexts where footer filter is enabled.
+-
+- 6. Done.
+-
+-## Tagging releases 
+-
+-I'm tagging each release in synch with the
+-[Tengine](http://tengine.taobao.org) releases.
+- 
+-## Other tengine modules on Github
+-
+- + [http concat](https://github.com/taobao/nginx-http-concat):
+-   allows to concatenate a given set of files and ship a single
+-   response from the server. It's particularly useful for **aggregating**
+-   CSS and Javascript files.
+-
+- + [http slice](https://github.com/taobao/nginx-http-slice): allows
+-   to serve a file by slices. A sort of reverse byte-range. Useful for
+-   serving large files while not hogging the network. 
+-
+-## Original documentation
+-
+-The
+-[original documentation](http://tengine.taobao.org/document_cn/http_footer_filter_cn.html)
+-in Chinese. Note that the examples given therein rely on
+-**non-standard** Nginx
+-[variables](http://tengine.taobao.org/document_cn/variables_cn.html)
+-that are not
+-[available](http://nginx.org/en/docs/http/ngx_http_core_module.html#variables)
+-on the official Nginx source but only on [tengine](http://tengine.taobao.org).
+-
+-## License
+-
+-Copyright (C) 2010-2012 Alibaba Group Holding Limited
+-
+-Redistribution and use in source and binary forms, with or without
+-modification, are permitted provided that the following conditions
+-are met:
+- 
+- 1. Redistributions of source code must retain the above copyright
+-    notice, this list of conditions and the following disclaimer.
+-    
+- 2. Redistributions in binary form must reproduce the above copyright
+-    notice, this list of conditions and the following disclaimer in the
+-    documentation and/or other materials provided with the distribution.
+-
+-THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS "AS IS" AND ANY
+-EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+-PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE
+-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+-BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+-WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+-OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+-IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+diff --git a/src/http/superresolution/asabnis.jpeg b/src/http/superresolution/asabnis.jpeg
+deleted file mode 100644
+index 47dd4a9..0000000
+Binary files a/src/http/superresolution/asabnis.jpeg and /dev/null differ
+diff --git a/src/http/superresolution/config b/src/http/superresolution/config
+index 03b9251..c2cba4b 100644
+--- a/src/http/superresolution/config
++++ b/src/http/superresolution/config
+@@ -1,7 +1,10 @@
+ ngx_addon_name=ngx_http_superresolution_module
+ HTTP_FILTER_MODULES="$HTTP_FILTER_MODULES ngx_http_superresolution_module"
+ NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_superresolution_module.c"
+-NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_use_cpp_superresolution.cpp"
+-ngx_feature_libs="-lopencv_highgui -lopencv_imgproc -lopencv_dnn -lopencv_core -lopencv_videoio -lopencv_imgcodecs -lopencv_dnn_superres"
++NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_superresolution_image.cpp"
++NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_superresolution_video.cpp"
++NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_superresolution_util.cpp"
++NGX_ADDON_DEPS="$NGX_ADDON_DEPS $ngx_addon_dir/ngx_http_superresolution_util.hpp"
++ngx_feature_libs="-lstdc++ -lopencv_highgui -lopencv_imgproc -lopencv_dnn -lopencv_core -lopencv_videoio -lopencv_imgcodecs -lopencv_dnn_superres -lavutil -lavcodec -lswscale -lavformat"
+ CORE_LIBS="$CORE_LIBS $ngx_feature_libs	"
+ 
+diff --git a/src/http/superresolution/ngx_http_superresolution_module.c b/src/http/superresolution/ngx_http_superresolution_module.c
+index 1a93145..ed3a599 100644
+--- a/src/http/superresolution/ngx_http_superresolution_module.c
++++ b/src/http/superresolution/ngx_http_superresolution_module.c
+@@ -1,45 +1,15 @@
+-/* #include <libavcodec/avcodec.h> */
+-/* #include <libavformat/avformat.h> */
+-/* #include <libavformat/avio.h> */
+-/* #include <libavutil/file.h> */
+-
+ #include <nginx.h>
+ #include <ngx_config.h>
+ #include <ngx_core.h>
+ #include <ngx_http.h>
+ 
+-
+ ngx_module_t ngx_http_superresolution_module;
+ 
+ static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
+ static ngx_http_output_body_filter_pt   ngx_http_next_body_filter;
+ 
+-
+-ngx_int_t ngx_cpp_test_handler(ngx_http_request_t *r, ngx_chain_t *in, char* buf, int buflen);
+-ngx_int_t ngx_cpp_text_modifyhandler(ngx_http_request_t *r, ngx_chain_t *in, char* buf, int buflen);
+-
+-
+-struct buffer_data {
+-    uint8_t *ptr;
+-    size_t size; ///< size left in the buffer
+-};
+-
+-/* static int read_packet(void *opaque, uint8_t *buf, int buf_size) */
+-/* { */
+-/*     struct buffer_data *bd = (struct buffer_data *)opaque; */
+-/*     buf_size = FFMIN(buf_size, (int) bd->size); */
+-
+-/*     if (!buf_size) */
+-/*         return AVERROR_EOF; */
+-    
+-/*     /\* copy internal buffer data to buf *\/ */
+-/*     memcpy(buf, bd->ptr, buf_size); */
+-/*     bd->ptr  += buf_size; */
+-/*     bd->size -= buf_size; */
+- 
+-/*     return buf_size; */
+-/* } */
+- 
++ngx_int_t ngx_http_superresolution_scale_video(ngx_http_request_t *r, ngx_chain_t *in, u_char* buf, int buflen);
++ngx_int_t ngx_http_superresolution_scale_image(ngx_http_request_t *r, ngx_chain_t *in, char* buf, int buflen);
+ 
+ static ngx_int_t
+ ngx_http_superresolution_header_filter(ngx_http_request_t *r)
+@@ -48,11 +18,12 @@ ngx_http_superresolution_header_filter(ngx_http_request_t *r)
+   return ngx_http_next_header_filter(r);
+ }
+ 
+-
+ static ngx_int_t
+ ngx_http_superresolution_handler(ngx_http_request_t *r, ngx_chain_t *in)
+ {
+-  
++
++  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "sabby calling handler: superresolving a video");    
++
+   if (r->main->internal) {
+     return ngx_http_next_body_filter(r, in) ;
+   }
+@@ -65,95 +36,45 @@ ngx_http_superresolution_handler(ngx_http_request_t *r, ngx_chain_t *in)
+       r->cache->use_resolvable > 0 &&
+       in->buf->in_file == 1) {
+         
+-    //AVFormatContext *fmt_ctx = NULL;
+-    //AVIOContext *avio_ctx = NULL;
+-    //uint8_t *avio_ctx_buffer = NULL;
+     size_t buffer_size;
+-    ngx_int_t ret;
+-    //size_t avio_ctx_buffer_size = 4096;
+-    //int ret = 0;
++    ngx_int_t ret = NGX_OK;
+     int n = 0;
+-    //struct buffer_data bd = { 0 };
+ 
+-    buffer_size = in->buf->file_last - in->buf->file_pos;    
+-    u_char *tmp = (u_char *) malloc(in->buf->file_last - in->buf->file_pos);
+-    n = ngx_read_file(in->buf->file, (u_char *) tmp, buffer_size, in->buf->file_pos);
++    buffer_size = in->buf->file_last - in->buf->file_pos;
++    u_char *buf = (u_char *) malloc(in->buf->file_last - in->buf->file_pos);
++    n = ngx_read_file(in->buf->file, (u_char *) buf, buffer_size, in->buf->file_pos);
++
++    /* image */
++    /* ngx_str_t content_type = r->headers_out.content_type; */
++    /* if (content_type.len >= 5 && */
++    /* 	ngx_strncasecmp(content_type.data, (u_char *) "image", 5) == 0) { */
++    /*   ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "superresolving an image");     */
++    /*   ret = ngx_http_superresolution_scale_image(r, in, (char *) buf, buffer_size); */
++    /* } */
++    /* // video */
++    /* else if (content_type.len >= 5 && */
++    /* 	     ngx_strncasecmp(content_type.data, (u_char *) "video", 5) == 0) { */
++    /*   ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "superresolving a video");     */
++    /*   ret = ngx_http_superresolution_scale_image(r, in, (char *) buf, buffer_size); */
++    /* } */
++
++    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "sabby superresolving a video");    
++    ret = ngx_http_superresolution_scale_video(r, in, (u_char *) buf, buffer_size);
+     
+-    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Superresolution for file fd %d and bytes %d \n", in->buf->file->fd, n);          
+-
+-    ret = ngx_cpp_test_handler(r, in, (char *) tmp, buffer_size);
+-    free(tmp);
++    free(buf);
+     
+     if (ret == NGX_DECLINED){
+       return ngx_http_next_body_filter(r, in);
+-    }
+-    
+-    
+-    //bd.ptr  = (uint8_t *) tmp;
+-    //bd.size = buffer_size;
+-    
+- /*    if (!(fmt_ctx = avformat_alloc_context())) { */
+- /*        ret = AVERROR(ENOMEM); */
+- /*        goto end; */
+- /*    } */
+- 
+- /*    avio_ctx_buffer = av_malloc(avio_ctx_buffer_size); */
+- /*    if (!avio_ctx_buffer) { */
+- /*        ret = AVERROR(ENOMEM); */
+- /*        goto end; */
+- /*    } */
+-
+- /*    avio_ctx = avio_alloc_context(avio_ctx_buffer, avio_ctx_buffer_size, */
+- /*                                  0, &bd, &read_packet, NULL, NULL); */
+- /*    if (!avio_ctx) { */
+- /*        ret = AVERROR(ENOMEM); */
+- /*        goto end; */
+- /*    } */
+-
+- /*    fmt_ctx->pb = avio_ctx; */
+- 
+- /*    ret = avformat_open_input(&fmt_ctx, NULL, NULL, NULL); */
+- /*    if (ret < 0) { */
+- /*      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Could not open input"); */
+- /*      goto end; */
+- /*    } */
+- 
+- /*    ret = avformat_find_stream_info(fmt_ctx, NULL); */
+- /*    if (ret < 0) { */
+- /*      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Could not find stream information"); */
+- /*      goto end; */
+- /*    } */
+-
+- /*    const AVDictionaryEntry *tag = NULL; */
+- /*    while ((tag = av_dict_get(fmt_ctx->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))){ */
+- /*      ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "%s=%s", tag->key, tag->value); */
+- /*    } */
+-    
+- /* end: */
+- /*    avformat_close_input(&fmt_ctx); */
+- 
+- /*    /\* note: the internal buffer could have changed, and be != avio_ctx_buffer *\/ */
+- /*    if (avio_ctx) */
+- /*        av_freep(&avio_ctx->buffer); */
+- /*    avio_context_free(&avio_ctx); */
+- 
+- /*    free(tmp); */
+- /*    if (ret < 0) { */
+- /*      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Error occurred: %s\n", av_err2str(ret)); */
+- /*      return ngx_http_next_body_filter(r, in); */
+- /*    } */
+-    
++    }            
+  } 
+-
+   return ngx_http_next_body_filter(r, in);
+ }
+ 
+ static ngx_int_t
+ ngx_http_superresolution_init(ngx_conf_t *cf)
+ {
+-  
+   ngx_http_next_header_filter = ngx_http_top_header_filter;
+-  ngx_http_top_header_filter = ngx_http_superresolution_header_filter;
++  ngx_http_top_header_filter  = ngx_http_superresolution_header_filter;
+   
+   ngx_http_next_body_filter = ngx_http_top_body_filter;
+   ngx_http_top_body_filter  = ngx_http_superresolution_handler;
+@@ -161,10 +82,9 @@ ngx_http_superresolution_init(ngx_conf_t *cf)
+   return NGX_OK;
+ }
+ 
+-
+ static ngx_http_module_t ngx_http_superresolution_module_ctx = {
+   NULL,                                 /* preconfiguration */
+-  ngx_http_superresolution_init,             /* postconfiguration */
++  ngx_http_superresolution_init,        /* postconfiguration */
+   NULL,                                 /* create main configuration */
+   NULL,                                 /* init main configuration */
+   NULL,                                 /* create server configuration */
+diff --git a/src/http/superresolution/ngx_http_use_cpp_superresolution.cpp b/src/http/superresolution/ngx_http_use_cpp_superresolution.cpp
+deleted file mode 100644
+index b8d6750..0000000
+--- a/src/http/superresolution/ngx_http_use_cpp_superresolution.cpp
++++ /dev/null
+@@ -1,204 +0,0 @@
+-
+-// stub module to test header files' C++ compatibility
+-
+-extern "C" {
+-  #include <nginx.h>
+-  #include <ngx_config.h>
+-  #include <ngx_core.h>
+-  #include <ngx_http.h>
+-}
+-
+-// nginx header files should go before other, because they define 64-bit off_t
+-// #include <string>
+-#include <iostream>
+-#include <opencv2/dnn_superres.hpp>
+-#include <opencv2/imgproc.hpp>
+-#include <opencv2/highgui.hpp>
+-#include <chrono>
+-
+-using namespace std;
+-using namespace cv;
+-using namespace dnn;
+-using namespace dnn_superres;
+-
+-extern "C" ngx_int_t ngx_cpp_test_handler(ngx_http_request_t *r, ngx_chain_t *in, char* buf, int buflen);
+-extern "C" ngx_int_t ngx_cpp_text_modifyhandler(ngx_http_request_t *r, ngx_chain_t *in, char* buf, int buflen);
+-
+-typedef struct {
+-  ngx_int_t width;
+-  ngx_int_t height;
+-} ngx_dims_t;
+-
+-ngx_dims_t
+-ngx_http_file_cache_get_dimensions(ngx_str_t resolution, ngx_log_t *log)
+-{
+-  u_char *m, *n;
+-  m = n = resolution.data;
+-  ngx_dims_t dim;
+-  dim.width = -1;
+-  dim.height = -1;
+-
+-  for (size_t i=0; i < resolution.len; i++){
+-    if(m != NULL && (*m == 'x' || *m == 'X')){
+-      dim.width = ngx_atoi(n, m-n);
+-      n = m+1;
+-    }
+-    ++m;
+-  }
+-
+-  if (m>n){
+-    dim.height = ngx_atoi(n, m-n);
+-  }
+-  return dim;
+-}
+-
+-
+-Mat upscaleImage(Mat img, string modelName, string modelPath, int scale, ngx_http_request_t *r){
+-
+-  using std::chrono::high_resolution_clock;
+-  using std::chrono::duration_cast;
+-  using std::chrono::duration;
+-  using std::chrono::milliseconds;
+-  
+-  DnnSuperResImpl sr;
+-  sr.readModel(modelPath);
+-  sr.setModel(modelName,scale);
+-
+-  auto t1 = high_resolution_clock::now();
+-  Mat outputImage;
+-  sr.upsample(img, outputImage);
+-  auto t2 = high_resolution_clock::now();
+-
+-  auto ms_int = duration_cast<milliseconds>(t2 - t1);  
+-  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Time per superresolution %d", ms_int.count());
+-  return outputImage;
+-}
+-
+-
+-ngx_int_t
+-ngx_cpp_test_handler(ngx_http_request_t *r, ngx_chain_t *in, char* buf, int buflen)
+-{
+-  
+-  Mat matImg;
+-  matImg = imdecode(Mat(1, buflen, CV_8UC1, buf), IMREAD_UNCHANGED);
+-
+-  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Dimensions original %d %d", matImg.size().width, matImg.size().height);
+-
+-  ngx_dims_t dim = ngx_http_file_cache_get_dimensions(r->headers_in.resolution, r->connection->log);
+-  float scale_factor = ((float) dim.width)/matImg.size().width;
+-
+-  Mat result;
+-  if (fabs(scale_factor - 1) < 0.01){
+-    return NGX_OK;
+-  }
+-  else if (fabs(scale_factor - 2) < 0.01){
+-    string path = "/usr/local/nginx/models/FSRCNN_x2.pb";
+-    string modelName = "fsrcnn";
+-    int scale = 2;
+-    result = upscaleImage(matImg, modelName, path, scale, r);    
+-  }
+-  else if(fabs(scale_factor - 4) < 0.01){
+-    string path = "/usr/local/nginx/models/FSRCNN_x4.pb";
+-    string modelName = "fsrcnn";
+-    int scale = 4;
+-    result = upscaleImage(matImg, modelName, path, scale, r);    
+-  }
+-  else if(fabs(scale_factor - 0.5) < 0.01){
+-    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Downscale by a factor of 2");
+-    resize(matImg, result, cv::Size(), 0.5, 0.5);
+-  }
+-  else if(fabs(scale_factor - 0.25) < 0.01){
+-    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Downscale by a factor of 4");
+-    resize(matImg, result, cv::Size(), 0.25, 0.25);
+-  }
+-  
+-  // Move to the last chain
+-  ngx_chain_t *cl;
+-  for (cl = in; cl; cl = cl->next) {
+-    if (cl->buf->last_buf) {
+-      break;
+-    }
+-  }
+-
+-  if (!cl->buf->in_file){
+-    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "NGX buf not in file.. should not happen: anirudh");
+-    return NGX_DECLINED;
+-  }
+-
+-  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Anirudh prev buflen %d", buflen);
+-  
+-  std::vector<uchar> buffer;
+-  cv::imencode(".png", result, buffer);
+-  u_char *newbuf = (u_char *) malloc(buffer.size());
+-  std::copy(buffer.begin(), buffer.end(), newbuf);
+-  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Anirudh new buflen %d", buffer.size());
+-
+-  ngx_buf_t *tmpbuf;
+-  tmpbuf = (ngx_buf_t *) ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+-  if (tmpbuf == NULL) {
+-        return NGX_DECLINED;
+-  }
+-
+-  tmpbuf->pos = newbuf;
+-  tmpbuf->last = tmpbuf->pos + buffer.size();
+-  tmpbuf->start = tmpbuf->pos;
+-  tmpbuf->end = tmpbuf->last;
+-  tmpbuf->last_buf = 1;
+-  tmpbuf->memory = 1;
+-  cl->buf = tmpbuf;
+-     
+-  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "Dimensions superresolved %d %d", result.size().width, result.size().height);
+-  
+-  return NGX_OK;
+-}
+-
+-
+-ngx_int_t
+-ngx_cpp_text_modifyhandler(ngx_http_request_t *r, ngx_chain_t *in, char* buf, int buflen)
+-{
+-  ngx_chain_t           *cl, *nl;
+-  for(int i=0; i < buflen; i++){
+-    buf[i] = 'a';
+-  }
+-
+-  // Move to the last chain
+-  for (cl = in; cl; cl = cl->next) {
+-    if (cl->buf->last_buf) {
+-      break;
+-    }
+-  }
+-
+-  if (!cl->buf->in_file){
+-    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "NGX buf not in file.. should not happen: anirudh");
+-    return NGX_DECLINED;
+-  }
+-
+-  ngx_buf_t *tmpbuf;
+-  tmpbuf = (ngx_buf_t *) ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+-  if (tmpbuf == NULL) {
+-        return NGX_DECLINED;
+-  }
+-
+-  tmpbuf->pos = (u_char *) buf;
+-  tmpbuf->last = tmpbuf->pos + buflen;
+-  tmpbuf->start = tmpbuf->pos;
+-  tmpbuf->end = tmpbuf->last;
+-  tmpbuf->last_buf = 1;
+-  tmpbuf->memory = 1;
+-
+-  if (cl->buf->in_file == 1) {
+-    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "This should happen. assigning tmpbuf: anirudh ");
+-    cl->buf = tmpbuf;
+-  } else {
+-    nl = ngx_alloc_chain_link(r->pool);
+-    if (nl == NULL) {
+-      return NGX_ERROR;
+-    }
+-    ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "This is happening: anirudh 2 ");
+-    nl->buf = tmpbuf;
+-    nl->next = NULL;
+-    cl->next = nl;
+-    cl->buf->last_buf = 0;
+-  }
+-  return NGX_OK;
+-}
